@@ -59,11 +59,12 @@ jobs:
         if: github.event.inputs.build_type != 'release'
         run: |
           cd ios
+          # 不使用 -destination，仅用 -sdk iphoneos 直接构建设备包
+          # 这样绕过 "iOS platform not installed" 的 destination 检查
           xcodebuild clean build \
             -workspace Runner.xcworkspace \
             -scheme Runner \
             -configuration Debug \
-            -destination 'generic/platform=iOS' \
             -sdk iphoneos \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
@@ -82,7 +83,6 @@ jobs:
             -workspace Runner.xcworkspace \
             -scheme Runner \
             -configuration Release \
-            -destination 'generic/platform=iOS' \
             -sdk iphoneos \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
