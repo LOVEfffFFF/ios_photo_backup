@@ -42,30 +42,13 @@ jobs:
 
       - name: Select Xcode
         run: |
-          # 查看可用 Xcode 版本
-          ls /Applications/Xcode*.app
-          # 使用系统自带的 Xcode（macos-latest 自带）
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
           xcodebuild -version
-
-      - name: Install CocoaPods (via Flutter)
-        run: |
-          # Flutter 的 prebuild 会自动调用 pod install
-          flutter precache --ios
-          cd ios
-          # 检查是否有 flutter_export_environment.sh，没有的话先生成
-          if [ ! -f "Flutter/flutter_export_environment.sh" ]; then
-            echo "Generating Flutter environment..."
-            flutter build ios --no-codesign --debug 2>&1 | head -20 || true
-          fi
-          # 手动调用 pod install
-          if [ -f "Flutter/flutter_export_environment.sh" ]; then
-            pod install --repo-update || pod install
-          fi
 
       - name: Build iOS App (Debug - for personal signing)
         if: github.event.inputs.build_type != 'release'
         run: |
+          # flutter build ios 会自动执行 pod install
           # 目标: iPhone 14 Pro Max, iOS 17.7.2
           flutter build ios --debug --no-codesign
 
