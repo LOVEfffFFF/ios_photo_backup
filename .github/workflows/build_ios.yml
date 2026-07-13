@@ -21,7 +21,7 @@ on:
 jobs:
   build:
     name: Build iOS App
-    runs-on: macos-latest
+    runs-on: macos-15
 
     steps:
       - name: Checkout code
@@ -30,7 +30,7 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.22.0'
+          flutter-version: '3.29.3'
           channel: 'stable'
           cache: true
 
@@ -39,7 +39,6 @@ jobs:
 
       - name: Generate iOS project files
         run: |
-          # flutter create 不会覆盖已有文件，只生成缺失的 Xcode 工程文件
           flutter create --platforms=ios --org com.photobackup --project-name photo_backup .
 
       - name: Install dependencies
@@ -47,7 +46,10 @@ jobs:
 
       - name: Select Xcode
         run: |
-          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          # macOS 15 runner 自带多个 Xcode 版本
+          ls /Applications/Xcode*.app
+          # 使用 Xcode 16.2 (兼容 iOS 17 目标 + Flutter 3.29)
+          sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
           xcodebuild -version
 
       - name: Build iOS App (Debug - for personal signing)
