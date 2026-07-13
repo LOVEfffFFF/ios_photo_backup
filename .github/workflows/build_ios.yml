@@ -56,6 +56,8 @@ jobs:
       - name: Build iOS App (Debug - for personal signing)
         if: github.event.inputs.build_type != 'release'
         run: |
+          # 目标: iPhone 14 Pro Max, iOS 17.7.2
+          # --debug 模式方便通过免费 Apple ID 侧载
           flutter build ios --debug --no-codesign
 
       - name: Build iOS App (Release)
@@ -70,6 +72,14 @@ jobs:
           zip -r PhotoBackup.ipa Payload/
           rm -rf Payload
           echo "IPA size: $(du -sh PhotoBackup.ipa | cut -f1)"
+          echo ""
+          echo "============================================"
+          echo "  Build Info"
+          echo "  Target Device: iPhone 14 Pro Max"
+          echo "  Target iOS:    17.7.2"
+          echo "  Min iOS:       17.0"
+          echo "  Architecture:  arm64"
+          echo "============================================"
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
