@@ -21,7 +21,7 @@ on:
 jobs:
   build:
     name: Build iOS App
-    runs-on: macos-15
+    runs-on: macos-latest
 
     steps:
       - name: Checkout code
@@ -30,12 +30,11 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.29.3'
           channel: 'stable'
           cache: true
 
       - name: Verify Flutter installation
-        run: flutter doctor -v
+        run: flutter --version
 
       - name: Generate iOS project files
         run: |
@@ -46,65 +45,40 @@ jobs:
 
       - name: Select Xcode
         run: |
-          # macOS 15 runner 自带多个 Xcode 版本
-          ls /Applications/Xcode*.app
-          # 使用 Xcode 16.2 (兼容 iOS 17 目标 + Flutter 3.29)
-          sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
           xcodebuild -version
-          # 查看已安装的 iOS SDK 版本
-          xcrun simctl list runtimes 2>/dev/null | grep -i ios || true
-          ls /Applications/Xcode_16.2.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/ || true
+          # 确认 iOS 平台已安装
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Disable code signing in Xcode project
+        run: |
+          # 修改 project.pbxproj 禁用代码签名，绕过 Team 检查
+          PBXPROJ="ios/Runner.xcodeproj/project.pbxproj"
+          sed -i '' 's/CODE_SIGN_IDENTITY = "iPhone Developer"/CODE_SIGN_IDENTITY = ""/g' "$PBXPROJ"
+          sed -i '' 's/CODE_SIGN_IDENTITY = "Apple Development"/CODE_SIGN_IDENTITY = ""/g' "$PBXPROJ"
+          sed -i '' 's/CODE_SIGN_STYLE = Automatic/CODE_SIGN_STYLE = Manual/g' "$PBXPROJ"
+          # 在所有 buildSettings 块中添加 CODE_SIGNING_ALLOWED = NO
+          sed -i '' '/PRODUCT_BUNDLE_IDENTIFIER/a\
+            \t\t\tCODE_SIGNING_ALLOWED = NO;\
+            \t\t\tCODE_SIGNING_REQUIRED = NO;\
+            \t\t\tDEVELOPMENT_TEAM = "";' "$PBXPROJ"
+          echo "=== Patched project.pbxproj ==="
+          grep -c "CODE_SIGNING_ALLOWED = NO" "$PBXPROJ" || true
 
       - name: Build iOS App (Debug - for personal signing)
         if: github.event.inputs.build_type != 'release'
         run: |
-          cd ios
-          # 不使用 -destination，仅用 -sdk iphoneos 直接构建设备包
-          # 这样绕过 "iOS platform not installed" 的 destination 检查
-          xcodebuild clean build \
-            -workspace Runner.xcworkspace \
-            -scheme Runner \
-            -configuration Debug \
-            -sdk iphoneos \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            DEVELOPMENT_TEAM="" \
-            PROVISIONING_PROFILE_SPECIFIER="" \
-            ONLY_ACTIVE_ARCH=NO \
-            ARCHS=arm64 \
-            IPHONEOS_DEPLOYMENT_TARGET=17.0
+          flutter build ios --debug --no-codesign
 
       - name: Build iOS App (Release)
         if: github.event.inputs.build_type == 'release' || startsWith(github.ref, 'refs/tags/v')
         run: |
-          cd ios
-          xcodebuild clean build \
-            -workspace Runner.xcworkspace \
-            -scheme Runner \
-            -configuration Release \
-            -sdk iphoneos \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            DEVELOPMENT_TEAM="" \
-            PROVISIONING_PROFILE_SPECIFIER="" \
-            ONLY_ACTIVE_ARCH=NO \
-            ARCHS=arm64 \
-            IPHONEOS_DEPLOYMENT_TARGET=17.0
+          flutter build ios --release --no-codesign
 
       - name: Create Payload and IPA
         run: |
-          # xcodebuild 构建产物在 ios/build/ 下
-          # 查找生成的 .app 文件
-          APP_PATH=$(find ios/build -name "Runner.app" -type d | head -1)
-          if [ -z "$APP_PATH" ]; then
-            # 备用：查找 xcodebuild 默认输出位置
-            APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name "Runner.app" -path "*/Build/Products/*" -type d | head -1)
-          fi
-          echo "Found app at: $APP_PATH"
           mkdir -p Payload
-          cp -r "$APP_PATH" Payload/
+          cp -r build/ios/iphoneos/Runner.app Payload/
           zip -r PhotoBackup.ipa Payload/
           rm -rf Payload
           echo "IPA size: $(du -sh PhotoBackup.ipa | cut -f1)"
@@ -135,69 +109,6 @@ jobs:
           retention-days: 7
 
   # ============================================================
-  # 可选：使用 Codemagic CLI 进行签名构建
-  # 需要在 GitHub Secrets 中配置：
-  #   - APPLE_DEVELOPER_CERTIFICATE (Base64 编码的 .p12 证书)
-  #   - APPLE_DEVELOPER_CERTIFICATE_PASSWORD
-  #   - APPLE_PROVISION_PROFILE (Base64 编码的 .mobileprovision)
-  #   - KEYCHAIN_PASSWORD
-  # ============================================================
-  build-signed:
-    name: Build Signed iOS IPA
-    runs-on: macos-latest
-    if: false  # 默认禁用，需要签名时改为 true
-    needs: []   # 不依赖其他 job
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.22.0'
-          channel: 'stable'
-          cache: true
-
-      - name: Install dependencies
-        run: flutter pub get
-
-      - name: Setup code signing
-        env:
-          CERTIFICATE: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE }}
-          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE_PASSWORD }}
-          PROVISION_PROFILE: ${{ secrets.APPLE_PROVISION_PROFILE }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-        run: |
-          # 创建临时钥匙串
-          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
-          security default-keychain -s build.keychain
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
-          security set-keychain-settings -lut 21600 build.keychain
-
-          # 导入证书
-          echo "$CERTIFICATE" | base64 --decode > certificate.p12
-          security import certificate.p12 -k build.keychain -P "$CERTIFICATE_PASSWORD" -A -T /usr/bin/codesign
-
-          # 导入描述文件
-          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-          echo "$PROVISION_PROFILE" | base64 --decode > ~/Library/MobileDevice/Provisioning\ Profiles/profile.mobileprovision
-
-          # 允许 codesign 访问钥匙串
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" build.keychain
-
-      - name: Build signed IPA
-        run: |
-          flutter build ipa --release --export-method=ad-hoc
-
-      - name: Upload signed IPA
-        uses: actions/upload-artifact@v4
-        with:
-          name: PhotoBackup-Signed-${{ github.sha }}
-          path: build/ios/ipa/*.ipa
-          retention-days: 30
-
-  # ============================================================
   # 代码质量检查（可选）
   # ============================================================
   analyze:
@@ -210,7 +121,6 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.22.0'
           channel: 'stable'
           cache: true
 
