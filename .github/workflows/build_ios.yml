@@ -37,6 +37,11 @@ jobs:
       - name: Verify Flutter installation
         run: flutter doctor -v
 
+      - name: Generate iOS project files
+        run: |
+          # flutter create 不会覆盖已有文件，只生成缺失的 Xcode 工程文件
+          flutter create --platforms=ios --org com.photobackup --project-name photo_backup .
+
       - name: Install dependencies
         run: flutter pub get
 
