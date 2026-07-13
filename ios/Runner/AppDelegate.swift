@@ -56,7 +56,7 @@ import Photos
 
     private func fetchAllAssets(result: @escaping FlutterResult) {
         PHPhotoLibrary.requestAuthorization { status in
-            guard status == .authorized || status == .limited else {
+            guard self.isPhotoLibraryAccessGranted(status) else {
                 result([])
                 return
             }
@@ -284,7 +284,7 @@ import Photos
 
         PHPhotoLibrary.shared().performChanges {
             let request = PHAssetCreationRequest.forAsset()
-            request.addResourceFile(with: .photo, fileURL: fileURL, options: nil)
+            try? request.addResource(with: .photo, fileURL: fileURL, options: nil)
             request.creationDate = creationDate
         } completionHandler: { success, error in
             DispatchQueue.main.async {
@@ -316,7 +316,7 @@ import Photos
 
         PHPhotoLibrary.shared().performChanges {
             let request = PHAssetCreationRequest.forAsset()
-            request.addResourceFile(with: .video, fileURL: fileURL, options: nil)
+            try? request.addResource(with: .video, fileURL: fileURL, options: nil)
             request.creationDate = creationDate
         } completionHandler: { success, error in
             DispatchQueue.main.async {
@@ -352,8 +352,8 @@ import Photos
 
         PHPhotoLibrary.shared().performChanges {
             let request = PHAssetCreationRequest.forAsset()
-            request.addResourceFile(with: .photo, fileURL: photoURL, options: nil)
-            request.addResourceFile(with: .pairedVideo, fileURL: videoURL, options: nil)
+            try? request.addResource(with: .photo, fileURL: photoURL, options: nil)
+            try? request.addResource(with: .pairedVideo, fileURL: videoURL, options: nil)
             request.creationDate = creationDate
         } completionHandler: { success, error in
             DispatchQueue.main.async {
@@ -366,6 +366,18 @@ import Photos
     }
 
     // MARK: - 辅助方法
+
+    private func isPhotoLibraryAccessGranted(_ status: PHAuthorizationStatus) -> Bool {
+        switch status {
+        case .authorized:
+            return true
+        default:
+            if #available(iOS 14, *) {
+                return status == .limited
+            }
+            return false
+        }
+    }
 
     private func mediaTypeString(_ mediaType: PHAssetMediaType) -> String {
         switch mediaType {

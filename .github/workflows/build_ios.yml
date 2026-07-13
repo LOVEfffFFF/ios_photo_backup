@@ -50,10 +50,12 @@ jobs:
           # 确认 iOS 平台已安装
           xcrun --sdk iphoneos --show-sdk-version
 
-      - name: Disable code signing in Xcode project
+      - name: Configure Xcode project for CI build
         run: |
-          # 修改 project.pbxproj 禁用代码签名，绕过 Team 检查
+          # flutter create 会重置 deployment target（默认 iOS 12），需改回 17.0
           PBXPROJ="ios/Runner.xcodeproj/project.pbxproj"
+          sed -i '' 's/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]*/IPHONEOS_DEPLOYMENT_TARGET = 17.0/g' "$PBXPROJ"
+          # 修改 project.pbxproj 禁用代码签名，绕过 Team 检查
           sed -i '' 's/CODE_SIGN_IDENTITY = "iPhone Developer"/CODE_SIGN_IDENTITY = ""/g' "$PBXPROJ"
           sed -i '' 's/CODE_SIGN_IDENTITY = "Apple Development"/CODE_SIGN_IDENTITY = ""/g' "$PBXPROJ"
           sed -i '' 's/CODE_SIGN_STYLE = Automatic/CODE_SIGN_STYLE = Manual/g' "$PBXPROJ"
@@ -63,6 +65,7 @@ jobs:
             \t\t\tCODE_SIGNING_REQUIRED = NO;\
             \t\t\tDEVELOPMENT_TEAM = "";' "$PBXPROJ"
           echo "=== Patched project.pbxproj ==="
+          grep "IPHONEOS_DEPLOYMENT_TARGET" "$PBXPROJ" || true
           grep -c "CODE_SIGNING_ALLOWED = NO" "$PBXPROJ" || true
 
       - name: Build iOS App (Debug - for personal signing)
