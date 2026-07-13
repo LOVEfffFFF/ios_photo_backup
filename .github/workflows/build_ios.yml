@@ -51,19 +51,19 @@ jobs:
           # 使用 Xcode 16.2 (兼容 iOS 17 目标 + Flutter 3.29)
           sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
           xcodebuild -version
+          # 查看已安装的 iOS SDK 版本
+          xcrun simctl list runtimes 2>/dev/null | grep -i ios || true
+          ls /Applications/Xcode_16.2.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/ || true
 
       - name: Build iOS App (Debug - for personal signing)
         if: github.event.inputs.build_type != 'release'
         run: |
-          # 使用 xcodebuild 直接构建，绕过 Flutter 的 Team 检查
-          # 目标: iPhone 14 Pro Max, iOS 17.7.2
           cd ios
           xcodebuild clean build \
             -workspace Runner.xcworkspace \
             -scheme Runner \
             -configuration Debug \
-            -destination 'generic/platform=iOS' \
-            -sdk iphoneos \
+            -destination 'generic/platform=iOS,name=Any iOS Device' \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
@@ -81,8 +81,7 @@ jobs:
             -workspace Runner.xcworkspace \
             -scheme Runner \
             -configuration Release \
-            -destination 'generic/platform=iOS' \
-            -sdk iphoneos \
+            -destination 'generic/platform=iOS,name=Any iOS Device' \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
