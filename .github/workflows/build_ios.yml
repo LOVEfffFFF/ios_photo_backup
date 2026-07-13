@@ -95,11 +95,12 @@ jobs:
           echo "============================================"
 
       - name: Upload IPA artifact
+        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.build_type == 'release'
         uses: actions/upload-artifact@v4
         with:
           name: PhotoBackup-${{ github.sha }}
           path: PhotoBackup.ipa
-          retention-days: 30
+          retention-days: 1
 
       - name: Upload build logs
         if: failure()
@@ -109,7 +110,7 @@ jobs:
           path: |
             build/
             ios/build/
-          retention-days: 7
+          retention-days: 1
 
   # ============================================================
   # 代码质量检查（可选）
