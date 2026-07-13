@@ -1,0 +1,38 @@
+# iOS Flutter App - Photo Backup
+#
+# 构建说明:
+# 1. 在 Xcode 中使用免费 Apple ID 登录
+# 2. 选择 Runner target，在 Signing & Capabilities 中选择 Personal Team
+# 3. Build & Run 到设备
+#
+# GitHub Actions CI/CD:
+# 推送代码到 GitHub 后自动构建 IPA，在 Actions 页面下载
+
+platform :ios, '13.0'
+
+target 'Runner' do
+  use_frameworks!
+  use_modular_headers!
+
+  flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
+
+  # 权限处理
+  pod 'permission_handler_apple', :git => 'https://github.com/Baseflow/flutter-permission-handler.git', :tag => 'permission_handler_apple-v9.3.0'
+
+  # 屏幕常亮
+  pod 'wakelock_plus', :git => 'https://github.com/fluttercommunity/wakelock_plus.git'
+
+  # 网络信息
+  pod 'network_info_plus', :git => 'https://github.com/fluttercommunity/plus_plugins.git'
+end
+
+post_install do |installer|
+  installer.pods_project.targets.each do |target|
+    flutter_additional_ios_build_settings(target)
+
+    target.build_configurations.each do |config|
+      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '13.0'
+      config.build_settings['ENABLE_BITCODE'] = 'NO'
+    end
+  end
+end

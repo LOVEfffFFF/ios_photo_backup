@@ -1,0 +1,151 @@
+import 'dart:io';
+import 'package:flutter/services.dart';
+import 'package:permission_handler/permission_handler.dart';
+
+/// 照片库访问封装 - 通过 MethodChannel 调用原生 iOS API
+class PhotoLibraryHelper {
+  static const _channel = MethodChannel('com.photobackup/photo_library');
+
+  /// 请求照片访问权限
+  static Future<bool> requestPermission() async {
+    // iOS 使用 permission_handler 请求照片权限
+    final status = await Permission.photos.request();
+    if (status.isGranted) return true;
+
+    // 如果被拒绝，尝试有限访问
+    if (status.isLimited) return true;
+
+    return false;
+  }
+
+  /// 请求添加照片到相册的权限
+  static Future<bool> requestAddOnlyPermission() async {
+    // iOS 14+ 的添加照片权限
+    final status = await Permission.photosAddOnly.request();
+    return status.isGranted || status.isLimited;
+  }
+
+  /// 获取所有照片资源信息（通过原生通道）
+  /// 返回 List<Map>，包含 localIdentifier, creationDate, mediaType, isLivePhoto
+  static Future<List<Map<String, dynamic>>> fetchAllAssets() async {
+    try {
+      final result = await _channel.invokeMethod('fetchAllAssets');
+      if (result is List) {
+        return result.cast<Map<dynamic, dynamic>>().map((e) {
+          return Map<String, dynamic>.from(e);
+        }).toList();
+      }
+      return [];
+    } catch (e) {
+      // 如果原生通道未实现，返回空列表
+      return [];
+    }
+  }
+
+  /// 导出照片数据到文件
+  /// [localIdentifier] 照片唯一标识
+  /// [targetPath] 目标文件路径
+  /// [isNetworkAccessAllowed] 是否允许下载 iCloud 原片
+  static Future<bool> exportPhotoAsset({
+    required String localIdentifier,
+    required String targetPath,
+    bool isNetworkAccessAllowed = true,
+  }) async {
+    try {
+      final result = await _channel.invokeMethod('exportPhotoAsset', {
+        'localIdentifier': localIdentifier,
+        'targetPath': targetPath,
+        'isNetworkAccessAllowed': isNetworkAccessAllowed,
+      });
+      return result == true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /// 导出视频资源到文件
+  static Future<bool> exportVideoAsset({
+    required String localIdentifier,
+    required String targetPath,
+    bool isNetworkAccessAllowed = true,
+  }) async {
+    try {
+      final result = await _channel.invokeMethod('exportVideoAsset', {
+        'localIdentifier': localIdentifier,
+        'targetPath': targetPath,
+        'isNetworkAccessAllowed': isNetworkAccessAllowed,
+      });
+      return result == true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /// 导出 Live Photo 的配对视频
+  static Future<bool> exportLivePhotoVideo({
+    required String localIdentifier,
+    required String targetPath,
+  }) async {
+    try {
+      final result = await _channel.invokeMethod('exportLivePhotoVideo', {
+        'localIdentifier': localIdentifier,
+        'targetPath': targetPath,
+      });
+      return result == true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /// 将照片写入系统相册
+  /// [filePath] 照片文件路径
+  /// [creationDate] 原始拍摄时间
+  static Future<bool> savePhotoToLibrary({
+    required String filePath,
+    required DateTime creationDate,
+  }) async {
+    try {
+      final result = await _channel.invokeMethod('savePhotoToLibrary', {
+        'filePath': filePath,
+        'creationDate': creationDate.millisecondsSinceEpoch,
+      });
+      return result == true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /// 将视频写入系统相册
+  static Future<bool> saveVideoToLibrary({
+    required String filePath,
+    required DateTime creationDate,
+  }) async {
+    try {
+      final result = await _channel.invokeMethod('saveVideoToLibrary', {
+        'filePath': filePath,
+        'creationDate': creationDate.millisecondsSinceEpoch,
+      });
+      return result == true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /// 将 Live Photo（图片+视频）写入系统相册
+  static Future<bool> saveLivePhotoToLibrary({
+    required String photoPath,
+    required String videoPath,
+    required DateTime creationDate,
+  }) async {
+    try {
+      final result = await _channel.invokeMethod('saveLivePhotoToLibrary', {
+        'photoPath': photoPath,
+        'videoPath': videoPath,
+        'creationDate': creationDate.millisecondsSinceEpoch,
+      });
+      return result == true;
+    } catch (e) {
+      return false;
+    }
+  }
+}
