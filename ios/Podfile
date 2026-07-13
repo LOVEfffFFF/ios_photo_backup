@@ -1,17 +1,12 @@
 # iOS Flutter App - Photo Backup
 #
-# 构建说明:
-# 1. 在 Xcode 中使用免费 Apple ID 登录
-# 2. 选择 Runner target，在 Signing & Capabilities 中选择 Personal Team
-# 3. Build & Run 到设备
-#
-# GitHub Actions CI/CD:
-# 推送代码到 GitHub 后自动构建 IPA，在 Actions 页面下载
+# 目标设备: iPhone 14 Pro Max, iOS 17.7.2
 
 platform :ios, '17.0'
 
-# 目标设备: iPhone 14 Pro Max, iOS 17.7.2
-# Xcode 构建时请确保 Deployment Target 设置为 17.0
+# 加载 Flutter 的 Pod 辅助方法
+flutter_application_path = File.dirname(File.realpath(__FILE__))
+load File.join(flutter_application_path, 'Flutter', 'flutter_export_environment.sh') rescue nil
 
 target 'Runner' do
   use_frameworks!
@@ -27,10 +22,8 @@ post_install do |installer|
     target.build_configurations.each do |config|
       config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '17.0'
       config.build_settings['ENABLE_BITCODE'] = 'NO'
-      # 仅构建 arm64，减小包体积
       config.build_settings['ARCHS'] = 'arm64'
       config.build_settings['VALID_ARCHS'] = 'arm64'
-      # iPhone 14 Pro Max 不支持 32 位
       config.build_settings['ONLY_ACTIVE_ARCH'] = 'NO'
     end
   end
