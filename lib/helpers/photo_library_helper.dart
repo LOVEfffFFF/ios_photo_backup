@@ -44,9 +44,11 @@ class PhotoLibraryHelper {
 
   /// 导出照片数据到文件
   /// [localIdentifier] 照片唯一标识
-  /// [targetPath] 目标文件路径
+  /// [targetPath] 目标文件路径（扩展名仅作占位，最终以原生写入的为准）
   /// [isNetworkAccessAllowed] 是否允许下载 iCloud 原片
-  static Future<bool> exportPhotoAsset({
+  ///
+  /// 返回实际写入的文件路径（原生按资源真实类型推导扩展名），失败返回 null
+  static Future<String?> exportPhotoAsset({
     required String localIdentifier,
     required String targetPath,
     bool isNetworkAccessAllowed = true,
@@ -57,9 +59,12 @@ class PhotoLibraryHelper {
         'targetPath': targetPath,
         'isNetworkAccessAllowed': isNetworkAccessAllowed,
       });
-      return result == true;
+      if (result is String) {
+        return result;
+      }
+      return null;
     } catch (e) {
-      return false;
+      return null;
     }
   }
 

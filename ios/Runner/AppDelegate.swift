@@ -1,6 +1,7 @@
 import UIKit
 import Flutter
 import Photos
+import UniformTypeIdentifiers
 
 @UIApplicationMain
 @objc class AppDelegate: FlutterAppDelegate {
@@ -57,7 +58,7 @@ import Photos
     private func fetchAllAssets(result: @escaping FlutterResult) {
         PHPhotoLibrary.requestAuthorization { status in
             guard self.isPhotoLibraryAccessGranted(status) else {
-                result([])
+                DispatchQueue.main.async { result([]) }
                 return
             }
 
@@ -82,7 +83,9 @@ import Photos
                 assetsList.append(assetDict)
             }
 
-            result(assetsList)
+            DispatchQueue.main.async {
+                result(assetsList)
+            }
         }
     }
 
@@ -108,37 +111,49 @@ import Photos
             return
         }
 
-        let options = PHImageRequestOptions()
-        options.isSynchronous = false
+        // 直接写资源原始字节：requestImageDataAndOrientation 拿到的是解码后的数据，
+        // 再写死 .jpg 会让 HEIC/RAW 变成「内容与扩展名不符」的坏文件
+        let resources = PHAssetResource.assetResources(for: asset)
+        guard let resource = resources.first(where: { $0.type == .fullSizePhoto })
+            ?? resources.first(where: { $0.type == .photo })
+            ?? resources.first(where: { $0.type == .alternatePhoto }) else {
+            result(false)
+            return
+        }
+
+        // 扩展名由资源真实类型推导
+        let ext = Self.preferredExtension(forUTI: resource.uniformTypeIdentifier)
+        let targetURL = URL(fileURLWithPath: targetPath)
+            .deletingPathExtension()
+            .appendingPathExtension(ext)
+
+        let directory = targetURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        try? FileManager.default.removeItem(at: targetURL)
+
+        let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = isNetworkAccessAllowed
-        options.deliveryMode = .highQualityFormat
-        options.version = .original
 
-        PHImageManager.default().requestImageDataAndOrientation(
-            for: asset,
+        // 回调可能触发多次，且必须切回主线程才能安全调用 FlutterResult
+        var responded = false
+        PHAssetResourceManager.default().writeData(
+            for: resource,
+            toFile: targetURL,
             options: options
-        ) { data, dataUTI, orientation, info in
-            guard let imageData = data else {
-                result(false)
-                return
-            }
-
-            let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
-            guard !isDegraded else { return }
-
-            do {
-                let targetURL = URL(fileURLWithPath: targetPath)
-                let directory = targetURL.deletingLastPathComponent()
-                try FileManager.default.createDirectory(
-                    at: directory,
-                    withIntermediateDirectories: true,
-                    attributes: nil
-                )
-                try imageData.write(to: targetURL)
-                result(true)
-            } catch {
-                print("PhotoBackup: Failed to write photo: \(error)")
-                result(false)
+        ) { error in
+            DispatchQueue.main.async {
+                guard !responded else { return }
+                responded = true
+                if let error = error {
+                    print("PhotoBackup: Failed to write photo: \(error)")
+                    result(false)
+                } else {
+                    result(targetURL.path)
+                }
             }
         }
     }
@@ -366,6 +381,28 @@ import Photos
     }
 
     // MARK: - 辅助方法
+
+    /// 由资源 UTI 推导文件扩展名（HEIC / JPEG / PNG / RAW / DNG 等）
+    private static func preferredExtension(forUTI uti: String) -> String {
+        if let type = UTType(uti), let ext = type.preferredFilenameExtension, !ext.isEmpty {
+            return ext
+        }
+        let fallback: [String: String] = [
+            "public.heic": "heic",
+            "public.heics": "heics",
+            "public.heif": "heif",
+            "public.jpeg": "jpg",
+            "public.png": "png",
+            "public.tiff": "tiff",
+            "com.compuserve.gif": "gif",
+            "public.mpeg-4": "mp4",
+            "com.apple.quicktime-movie": "mov",
+            "public.raw-image": "raw",
+            "public.dng": "dng",
+            "com.apple.private.dng-raw-image": "dng",
+        ]
+        return fallback[uti] ?? "jpg"
+    }
 
     private func isPhotoLibraryAccessGranted(_ status: PHAuthorizationStatus) -> Bool {
         switch status {

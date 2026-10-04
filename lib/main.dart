@@ -1,11 +1,10 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
+
 import 'ui/main_page.dart';
-import 'package:wakelock_plus/wakelock_plus.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  WakelockPlus.enable();
+  // 屏幕常亮改为「传输期间」按需开启，避免 App 装好后设备永不自动锁屏
   runApp(const PhotoBackupApp());
 }
 

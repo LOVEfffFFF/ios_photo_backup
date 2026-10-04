@@ -1,11 +1,11 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../managers/backup_manager.dart';
-import '../managers/restore_manager.dart';
-import '../managers/record_store.dart';
-import '../managers/web_server_manager.dart';
+import '../services/server_config.dart';
+import '../services/upload_client.dart';
 
 /// 主界面
 class MainPage extends StatefulWidget {
@@ -17,18 +17,22 @@ class MainPage extends StatefulWidget {
 
 class _MainPageState extends State<MainPage> {
   final BackupManager _backupManager = BackupManager();
-  final RestoreManager _restoreManager = RestoreManager();
-  final RecordStore _recordStore = RecordStore();
-  final WebServerManager _webServerManager = WebServerManager();
 
-  // 状态
+  // 服务器配置
+  final TextEditingController _addressController = TextEditingController();
+  final TextEditingController _tokenController = TextEditingController();
+  ServerConfig _config = ServerConfig.empty;
+  bool _testing = false;
+  bool _connectionOk = false;
+  String? _connectionHint;
+
+  // 运行状态
   String _statusText = '就绪';
   double _progress = 0;
   int _completed = 0;
   int _total = 0;
+  int _uploadedBytes = 0;
   bool _isOperating = false;
-  String? _serverUrl;
-  bool _isServerRunning = false;
 
   // 日志
   final List<String> _logs = [];
@@ -38,21 +42,33 @@ class _MainPageState extends State<MainPage> {
   int _backedCount = 0;
 
   StreamSubscription? _backupSubscription;
-  StreamSubscription? _restoreSubscription;
 
   @override
   void initState() {
     super.initState();
+    _loadConfig();
     _loadStats();
   }
 
   @override
   void dispose() {
     _backupSubscription?.cancel();
-    _restoreSubscription?.cancel();
-    _webServerManager.stop();
+    _addressController.dispose();
+    _tokenController.dispose();
     _logScrollController.dispose();
     super.dispose();
+  }
+
+  Future<void> _loadConfig() async {
+    final config = await ServerConfig.load();
+    if (!mounted) return;
+    setState(() {
+      _config = config;
+      if (config.isConfigured) {
+        _addressController.text = config.displayAddress;
+        _tokenController.text = config.token;
+      }
+    });
   }
 
   Future<void> _loadStats() async {
@@ -69,6 +85,7 @@ class _MainPageState extends State<MainPage> {
   }
 
   void _addLog(String message) {
+    if (!mounted) return;
     final now = DateTime.now();
     final time =
         '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}';
@@ -79,7 +96,6 @@ class _MainPageState extends State<MainPage> {
       }
     });
 
-    // 自动滚动到最新日志
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_logScrollController.hasClients) {
         _logScrollController.animateTo(
@@ -91,40 +107,81 @@ class _MainPageState extends State<MainPage> {
     });
   }
 
+  /// 解析输入框里的地址，非法时返回 null
+  ServerConfig? _parseInput() {
+    return ServerConfig.parseAddress(
+      _addressController.text,
+      token: _tokenController.text,
+    );
+  }
+
+  Future<void> _saveAndTest() async {
+    final parsed = _parseInput();
+    if (parsed == null) {
+      setState(() {
+        _connectionOk = false;
+        _connectionHint = '地址格式不正确，示例：192.168.1.10:8080 或 nas.local:8080';
+      });
+      return;
+    }
+
+    await parsed.save();
+    if (!mounted) return;
+    setState(() {
+      _config = parsed;
+      _connectionOk = false;
+      _connectionHint = '已保存，正在测试连接...';
+      _testing = true;
+    });
+
+    final error = await UploadClient(parsed).testConnection();
+    if (!mounted) return;
+    setState(() {
+      _testing = false;
+      _connectionOk = error == null;
+      _connectionHint = error ?? '连接正常，可以开始备份';
+    });
+    _addLog(error == null
+        ? '服务器连接正常：${parsed.baseUrl}'
+        : '服务器连接异常：$error');
+  }
+
   Future<void> _startBackup() async {
     if (_isOperating) return;
+
+    // 传输期间保持屏幕常亮，防止息屏导致中断
+    await WakelockPlus.enable();
 
     setState(() {
       _isOperating = true;
       _progress = 0;
       _completed = 0;
       _total = 0;
+      _uploadedBytes = 0;
       _statusText = '正在备份...';
     });
 
-    _addLog('开始增量备份');
+    _addLog('开始增量备份 → ${_config.isConfigured ? _config.baseUrl : '未配置服务器'}');
 
-    final stream = _backupManager.startBackup();
-    _backupSubscription = stream.listen(
+    _backupSubscription = _backupManager.startBackup().listen(
       (progress) {
         if (!mounted) return;
         setState(() {
           _completed = progress.completed;
           _total = progress.total;
           _progress = progress.percentage;
-          _statusText = progress.currentFile ?? '备份中...';
-
-          if (progress.error != null) {
-            _addLog('❌ ${progress.error}');
+          _uploadedBytes = progress.uploadedBytes;
+          if (progress.currentFile != null) {
+            _statusText = progress.currentFile!;
           }
         });
 
-        if (progress.percentage >= 100 || progress.error != null) {
-          _addLog(
-            progress.error != null
-                ? '备份出错: ${progress.error}'
-                : '备份完成！共备份 ${progress.completed} 个文件',
-          );
+        // 单文件失败只记日志，不中断整批（fatal 才是终止信号）
+        if (progress.error != null) {
+          _addLog(progress.fatal ? '❌ ${progress.error}' : '⚠️ ${progress.error}');
+        }
+
+        if (progress.fatal) {
           _finishOperation();
           _loadStats();
         }
@@ -140,68 +197,23 @@ class _MainPageState extends State<MainPage> {
     );
   }
 
-  Future<void> _startRestore() async {
-    if (_isOperating) return;
-
-    setState(() {
-      _isOperating = true;
-      _progress = 0;
-      _completed = 0;
-      _total = 0;
-      _statusText = '正在恢复...';
-    });
-
-    _addLog('开始恢复照片到相册');
-
-    final stream = _restoreManager.startRestore();
-    _restoreSubscription = stream.listen(
-      (progress) {
-        if (!mounted) return;
-        setState(() {
-          _completed = progress.completed;
-          _total = progress.total;
-          _progress = progress.percentage;
-          _statusText = progress.currentFile ?? '恢复中...';
-
-          if (progress.error != null) {
-            _addLog('❌ ${progress.error}');
-          }
-        });
-
-        if (progress.percentage >= 100 || progress.error != null) {
-          _addLog(
-            progress.error != null
-                ? '恢复出错: ${progress.error}'
-                : '恢复完成！成功恢复 ${progress.completed} 个文件',
-          );
-          _finishOperation();
-        }
-      },
-      onError: (error) {
-        _addLog('❌ 恢复失败: $error');
-        _finishOperation();
-      },
-      onDone: () {
-        _finishOperation();
-      },
-    );
-  }
-
   void _finishOperation() {
     if (!mounted) return;
+    WakelockPlus.disable();
     setState(() {
       _isOperating = false;
-      if (!_statusText.contains('完成') && !_statusText.contains('取消')) {
-        _statusText = '操作完成';
+      if (!_statusText.contains('完成') &&
+          !_statusText.contains('取消') &&
+          !_statusText.contains('结束')) {
+        _statusText = '操作结束';
       }
     });
   }
 
   void _cancelOperation() {
     _backupManager.cancel();
-    _restoreManager.cancel();
     _backupSubscription?.cancel();
-    _restoreSubscription?.cancel();
+    WakelockPlus.disable();
     setState(() {
       _isOperating = false;
       _statusText = '操作已取消';
@@ -209,22 +221,17 @@ class _MainPageState extends State<MainPage> {
     _addLog('操作已取消');
   }
 
-  Future<void> _toggleServer() async {
-    if (_isServerRunning) {
-      await _webServerManager.stop();
-      setState(() {
-        _isServerRunning = false;
-        _serverUrl = null;
-      });
-      _addLog('WiFi 服务器已关闭');
-    } else {
-      final result = await _webServerManager.start();
-      setState(() {
-        _isServerRunning = result != null && !result.contains('失败');
-        _serverUrl = result;
-      });
-      _addLog(result ?? '服务器启动失败');
+  String _formatBytes(int bytes) {
+    if (bytes >= 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
     }
+    if (bytes >= 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
+    if (bytes >= 1024) {
+      return '${(bytes / 1024).toStringAsFixed(0)} KB';
+    }
+    return '$bytes B';
   }
 
   @override
@@ -242,19 +249,14 @@ class _MainPageState extends State<MainPage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // 状态卡片
               _buildStatusCard(),
               const SizedBox(height: 16),
-
-              // 进度区域
+              _buildServerCard(),
+              const SizedBox(height: 16),
               _buildProgressCard(),
               const SizedBox(height: 16),
-
-              // 按钮区域
-              _buildButtonCard(),
+              _buildActionCard(),
               const SizedBox(height: 16),
-
-              // 日志区域
               _buildLogCard(),
             ],
           ),
@@ -270,45 +272,16 @@ class _MainPageState extends State<MainPage> {
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: Padding(
         padding: const EdgeInsets.all(20),
-        child: Column(
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceAround,
           children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceAround,
-              children: [
-                _buildStatItem('已备份', '$_backedCount', Icons.cloud_done_outlined),
-                _buildStatItem('状态', _isOperating ? '运行中' : '就绪', Icons.info_outline),
-                _buildStatItem('WiFi', _isServerRunning ? '已开启' : '未开启',
-                    Icons.wifi),
-              ],
+            _buildStatItem('已备份', '$_backedCount', Icons.cloud_done_outlined),
+            _buildStatItem('状态', _isOperating ? '运行中' : '就绪', Icons.info_outline),
+            _buildStatItem(
+              '服务器',
+              _config.isConfigured ? '已配置' : '未配置',
+              Icons.dns_outlined,
             ),
-            if (_serverUrl != null) ...[
-              const SizedBox(height: 12),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                decoration: BoxDecoration(
-                  color: Colors.blue.shade50,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(Icons.link, size: 16, color: Colors.blue.shade700),
-                    const SizedBox(width: 6),
-                    Flexible(
-                      child: Text(
-                        _serverUrl!,
-                        style: TextStyle(
-                          color: Colors.blue.shade700,
-                          fontSize: 13,
-                          fontFamily: 'monospace',
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
           ],
         ),
       ),
@@ -330,6 +303,87 @@ class _MainPageState extends State<MainPage> {
     );
   }
 
+  Widget _buildServerCard() {
+    return Card(
+      elevation: 0,
+      color: Colors.white,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text(
+              '服务器设置',
+              style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '在电脑上运行接收端脚本后，把下面地址填成电脑的 IP 或域名',
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: _addressController,
+              enabled: !_isOperating,
+              keyboardType: TextInputType.url,
+              autocorrect: false,
+              decoration: const InputDecoration(
+                labelText: '电脑地址（可带端口）',
+                hintText: '例如 192.168.1.10:8080',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _tokenController,
+              enabled: !_isOperating,
+              autocorrect: false,
+              decoration: const InputDecoration(
+                labelText: '访问密钥（接收端未启用可留空）',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+            ),
+            const SizedBox(height: 12),
+            _buildButton(
+              label: _testing ? '测试中...' : '保存并测试连接',
+              icon: Icons.wifi_tethering,
+              color: Colors.teal,
+              onPressed: (_isOperating || _testing) ? null : _saveAndTest,
+            ),
+            if (_connectionHint != null) ...[
+              const SizedBox(height: 10),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(
+                    _connectionOk ? Icons.check_circle : Icons.error_outline,
+                    size: 16,
+                    color: _connectionOk ? Colors.green : Colors.orange,
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      _connectionHint!,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: _connectionOk
+                            ? Colors.green.shade700
+                            : Colors.orange.shade800,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildProgressCard() {
     if (_total == 0 && !_isOperating) {
       return const SizedBox.shrink();
@@ -347,7 +401,10 @@ class _MainPageState extends State<MainPage> {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text('进度', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16)),
+                const Text(
+                  '进度',
+                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
+                ),
                 Text(
                   _total > 0 ? '$_completed / $_total' : '',
                   style: TextStyle(color: Colors.grey.shade600, fontSize: 14),
@@ -365,9 +422,19 @@ class _MainPageState extends State<MainPage> {
               ),
             ),
             const SizedBox(height: 8),
-            Text(
-              '${_progress.toStringAsFixed(1)}%',
-              style: TextStyle(fontSize: 14, color: Colors.grey.shade600),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  '${_progress.toStringAsFixed(1)}%',
+                  style: TextStyle(fontSize: 14, color: Colors.grey.shade600),
+                ),
+                if (_uploadedBytes > 0)
+                  Text(
+                    '已传输 ${_formatBytes(_uploadedBytes)}',
+                    style: TextStyle(fontSize: 14, color: Colors.grey.shade600),
+                  ),
+              ],
             ),
             if (_statusText.isNotEmpty) ...[
               const SizedBox(height: 8),
@@ -384,7 +451,7 @@ class _MainPageState extends State<MainPage> {
     );
   }
 
-  Widget _buildButtonCard() {
+  Widget _buildActionCard() {
     return Card(
       elevation: 0,
       color: Colors.white,
@@ -403,39 +470,17 @@ class _MainPageState extends State<MainPage> {
               children: [
                 Expanded(
                   child: _buildButton(
-                    label: '开始备份',
-                    icon: Icons.backup_outlined,
+                    label: '备份到电脑',
+                    icon: Icons.cloud_upload_outlined,
                     color: Colors.blue,
                     onPressed: _isOperating ? null : _startBackup,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _buildButton(
-                    label: '恢复到相册',
-                    icon: Icons.restore_outlined,
-                    color: Colors.green,
-                    onPressed: _isOperating ? null : _startRestore,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: _buildButton(
-                    label: _isServerRunning ? '关闭 WiFi 服务器' : '开启 WiFi 服务器',
-                    icon: _isServerRunning ? Icons.wifi_off : Icons.wifi,
-                    color: _isServerRunning ? Colors.orange : Colors.teal,
-                    onPressed: _toggleServer,
                   ),
                 ),
                 if (_isOperating) ...[
                   const SizedBox(width: 12),
                   Expanded(
                     child: _buildButton(
-                      label: '取消操作',
+                      label: '取消',
                       icon: Icons.cancel_outlined,
                       color: Colors.red,
                       onPressed: _cancelOperation,
@@ -443,6 +488,11 @@ class _MainPageState extends State<MainPage> {
                   ),
                 ],
               ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '增量备份：已传输过的照片会自动跳过，中断后重跑即可继续',
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
             ),
           ],
         ),
