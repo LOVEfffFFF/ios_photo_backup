@@ -83,26 +83,12 @@ jobs:
       - name: Build iOS App (Debug - for personal signing)
         if: github.event.inputs.build_type != 'release'
         run: |
-          # Xcode 26 下 flutter 会在编译成功后仍校验 Development Team 并返回非零，
-          # 但产物其实已生成。因此以产物是否存在作为成功判据：
-          #   真编译失败 → 没有 Runner.app → 报错退出
-          #   仅 Team 校验失败 → Runner.app 存在 → 继续打包
-          flutter build ios --debug --no-codesign || true
-          if [ ! -d "build/ios/iphoneos/Runner.app" ]; then
-            echo "::error::编译失败：未生成 build/ios/iphoneos/Runner.app"
-            exit 1
-          fi
-          echo "Runner.app 已生成，继续打包"
+          bash .github/scripts/build_ios.sh Debug
 
       - name: Build iOS App (Release)
         if: github.event.inputs.build_type == 'release' || startsWith(github.ref, 'refs/tags/v')
         run: |
-          flutter build ios --release --no-codesign || true
-          if [ ! -d "build/ios/iphoneos/Runner.app" ]; then
-            echo "::error::编译失败：未生成 build/ios/iphoneos/Runner.app"
-            exit 1
-          fi
-          echo "Runner.app 已生成，继续打包"
+          bash .github/scripts/build_ios.sh Release
 
       - name: Create Payload and IPA
         run: |
