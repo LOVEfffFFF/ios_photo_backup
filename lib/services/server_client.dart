@@ -22,22 +22,25 @@ class UploadResult {
   });
 }
 
-/// 上传客户端：把资产以原始字节 POST 给电脑端接收服务
+/// 接收端（电脑）客户端：上传、下载、连通性探测
 ///
-/// 协议见接收端脚本 PhotoBackupReceiver.ps1：
-///   POST {baseUrl}/upload
-///     X-Auth-Token: <可选>
-///     X-File-Path:  <URL 编码的相对路径>
-///     body:         文件原始字节
-class UploadClient {
+/// 协议见 windows-receiver/PhotoBackupReceiver.ps1：
+///   GET  /ping                              连通性探测
+///   POST /upload    X-File-Path: <相对路径>   上传文件原始字节
+///   GET  /download?path=<相对路径>            下载文件（恢复用）
+class ServerClient {
   final ServerConfig config;
 
   /// 单个文件的上传超时（大视频留足时间）
   final Duration uploadTimeout;
 
-  UploadClient(
+  /// 单个文件的下载超时
+  final Duration downloadTimeout;
+
+  ServerClient(
     this.config, {
     this.uploadTimeout = const Duration(minutes: 15),
+    this.downloadTimeout = const Duration(minutes: 15),
   });
 
   /// 连通性探测：返回 null 表示正常，否则返回错误描述
@@ -68,7 +71,7 @@ class UploadClient {
     }
   }
 
-  /// 上传单个文件
+  /// 将本地文件上传到接收端
   Future<UploadResult> uploadFile({
     required File file,
     required String relativePath,
@@ -97,7 +100,7 @@ class UploadClient {
           final decoded = jsonDecode(body) as Map<String, dynamic>;
           skipped = decoded['skipped'] == true;
         } catch (_) {
-          // 接收端返回体解析失败不影响「上传成功」的判定
+          // 响应体解析失败不影响「上传成功」的判定
         }
         return UploadResult(success: true, skipped: skipped);
       }
@@ -118,6 +121,57 @@ class UploadClient {
     } catch (e) {
       return UploadResult(success: false, message: '$e');
     } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// 从接收端下载文件到 [targetPath]
+  ///
+  /// 返回实际写入的字节数；返回 -1 表示失败（不存在 / 鉴权失败 / 超时等）
+  Future<int> downloadFile({
+    required String relativePath,
+    required String targetPath,
+  }) async {
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 15);
+    IOSink? sink;
+    try {
+      final uri = Uri.parse('${config.baseUrl}/download')
+          .replace(queryParameters: {'path': relativePath});
+      final request = await client.getUrl(uri);
+      if (config.token.isNotEmpty) {
+        request.headers.set('X-Auth-Token', config.token);
+      }
+
+      final response = await request.close().timeout(downloadTimeout);
+      if (response.statusCode != 200) {
+        await response.drain();
+        return -1;
+      }
+
+      final file = File(targetPath);
+      await file.parent.create(recursive: true);
+      sink = file.openWrite();
+
+      var received = 0;
+      await for (final chunk in response) {
+        sink.add(chunk);
+        received += chunk.length;
+      }
+      await sink.flush();
+      await sink.close();
+      sink = null;
+      return received;
+    } on TimeoutException {
+      return -1;
+    } catch (e) {
+      return -1;
+    } finally {
+      try {
+        await sink?.close();
+      } catch (_) {
+        // 忽略关闭异常
+      }
       client.close(force: true);
     }
   }

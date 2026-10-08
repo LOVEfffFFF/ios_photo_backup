@@ -5,8 +5,9 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../helpers/photo_library_helper.dart';
 import '../managers/backup_manager.dart';
+import '../managers/restore_manager.dart';
+import '../services/server_client.dart';
 import '../services/server_config.dart';
-import '../services/upload_client.dart';
 
 /// 主界面
 class MainPage extends StatefulWidget {
@@ -18,6 +19,7 @@ class MainPage extends StatefulWidget {
 
 class _MainPageState extends State<MainPage> {
   final BackupManager _backupManager = BackupManager();
+  final RestoreManager _restoreManager = RestoreManager();
 
   // 服务器配置
   final TextEditingController _addressController = TextEditingController();
@@ -43,6 +45,7 @@ class _MainPageState extends State<MainPage> {
   int _backedCount = 0;
 
   StreamSubscription? _backupSubscription;
+  StreamSubscription? _restoreSubscription;
 
   @override
   void initState() {
@@ -54,6 +57,7 @@ class _MainPageState extends State<MainPage> {
   @override
   void dispose() {
     _backupSubscription?.cancel();
+    _restoreSubscription?.cancel();
     _addressController.dispose();
     _tokenController.dispose();
     _logScrollController.dispose();
@@ -143,7 +147,7 @@ class _MainPageState extends State<MainPage> {
       _connectionHint = '正在测试连接...';
     });
 
-    final error = await UploadClient(parsed).testConnection();
+    final error = await ServerClient(parsed).testConnection();
     if (!mounted) return;
     setState(() {
       _testing = false;
@@ -206,6 +210,54 @@ class _MainPageState extends State<MainPage> {
     );
   }
 
+  Future<void> _startRestore() async {
+    if (_isOperating) return;
+
+    // 下载期间保持屏幕常亮
+    await WakelockPlus.enable();
+
+    setState(() {
+      _isOperating = true;
+      _progress = 0;
+      _completed = 0;
+      _total = 0;
+      _uploadedBytes = 0;
+      _statusText = '正在从电脑恢复...';
+    });
+
+    _addLog('开始恢复：从 ${_config.isConfigured ? _config.baseUrl : '未配置服务器'} 拉回相册');
+
+    _restoreSubscription = _restoreManager.startRestore().listen(
+      (progress) {
+        if (!mounted) return;
+        setState(() {
+          _completed = progress.completed;
+          _total = progress.total;
+          _progress = progress.percentage;
+          _uploadedBytes = progress.downloadedBytes;
+          if (progress.currentFile != null) {
+            _statusText = progress.currentFile!;
+          }
+        });
+
+        if (progress.error != null) {
+          _addLog(progress.fatal ? '❌ ${progress.error}' : '⚠️ ${progress.error}');
+        }
+
+        if (progress.fatal) {
+          _finishOperation();
+        }
+      },
+      onError: (error) {
+        _addLog('❌ 恢复失败: $error');
+        _finishOperation();
+      },
+      onDone: () {
+        _finishOperation();
+      },
+    );
+  }
+
   void _finishOperation() {
     if (!mounted) return;
     WakelockPlus.disable();
@@ -221,7 +273,9 @@ class _MainPageState extends State<MainPage> {
 
   void _cancelOperation() {
     _backupManager.cancel();
+    _restoreManager.cancel();
     _backupSubscription?.cancel();
+    _restoreSubscription?.cancel();
     WakelockPlus.disable();
     setState(() {
       _isOperating = false;
@@ -485,22 +539,29 @@ class _MainPageState extends State<MainPage> {
                     onPressed: _isOperating ? null : _startBackup,
                   ),
                 ),
-                if (_isOperating) ...[
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: _buildButton(
-                      label: '取消',
-                      icon: Icons.cancel_outlined,
-                      color: Colors.red,
-                      onPressed: _cancelOperation,
-                    ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _buildButton(
+                    label: '从电脑恢复',
+                    icon: Icons.cloud_download_outlined,
+                    color: Colors.green,
+                    onPressed: _isOperating ? null : _startRestore,
                   ),
-                ],
+                ),
               ],
             ),
+            if (_isOperating) ...[
+              const SizedBox(height: 12),
+              _buildButton(
+                label: '取消操作',
+                icon: Icons.cancel_outlined,
+                color: Colors.red,
+                onPressed: _cancelOperation,
+              ),
+            ],
             const SizedBox(height: 8),
             Text(
-              '增量备份：已传输过的照片会自动跳过，中断后重跑即可继续',
+              '备份会跳过已传输的；恢复只导入尚未恢复过的照片，可重复点击不会重复导入。',
               style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
             ),
           ],

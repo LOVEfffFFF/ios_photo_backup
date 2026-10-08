@@ -6,8 +6,8 @@ import 'package:path/path.dart' as p;
 import '../helpers/file_helper.dart';
 import '../helpers/photo_library_helper.dart';
 import '../models/backup_record.dart';
+import '../services/server_client.dart';
 import '../services/server_config.dart';
-import '../services/upload_client.dart';
 import 'record_store.dart';
 
 /// 备份进度信息
@@ -86,7 +86,7 @@ class BackupManager {
         return;
       }
 
-      final client = UploadClient(config);
+      final client = ServerClient(config);
 
       yield BackupProgress(
         completed: 0,
@@ -289,7 +289,7 @@ class BackupManager {
 
   /// 导出照片（含 Live Photo 配对视频）并上传，返回上传字节数
   Future<int> _exportAndUploadPhoto({
-    required UploadClient client,
+    required ServerClient client,
     required Directory tempDir,
     required String localIdentifier,
     required DateTime creationDate,
@@ -392,7 +392,7 @@ class BackupManager {
 
   /// 导出视频并上传，返回上传字节数
   Future<int> _exportAndUploadVideo({
-    required UploadClient client,
+    required ServerClient client,
     required Directory tempDir,
     required String localIdentifier,
     required DateTime creationDate,
