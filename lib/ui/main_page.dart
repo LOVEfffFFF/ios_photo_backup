@@ -321,21 +321,27 @@ class _MainPageState extends State<MainPage> {
         foregroundColor: const Color(0xFF1D1D1F),
       ),
       body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              _buildStatusCard(),
-              const SizedBox(height: 16),
-              _buildServerCard(),
-              const SizedBox(height: 16),
-              _buildProgressCard(),
-              const SizedBox(height: 16),
-              _buildActionCard(),
-              const SizedBox(height: 16),
-              _buildLogCard(),
-            ],
+        // 数字键盘没有「收起」键，点页面空白处主动收起
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(16),
+            keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _buildStatusCard(),
+                const SizedBox(height: 16),
+                _buildServerCard(),
+                const SizedBox(height: 16),
+                _buildProgressCard(),
+                const SizedBox(height: 16),
+                _buildActionCard(),
+                const SizedBox(height: 16),
+                _buildLogCard(),
+              ],
+            ),
           ),
         ),
       ),
