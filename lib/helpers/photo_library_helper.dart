@@ -25,6 +25,30 @@ class PhotoLibraryHelper {
     return status.isGranted || status.isLimited;
   }
 
+  /// 触发 iOS 本地网络访问授权（iOS 14+）
+  ///
+  /// 单纯的单播 HTTP 连接不足以让系统弹出授权窗；未授权时连接会被沙盒
+  /// 直接丢弃，表现为 `No route to host, errno = 65`。
+  /// 这里双管齐下：原生 Bonjour 浏览（主）+ Dart 侧 mDNS 探测包（兜底）。
+  static Future<void> requestLocalNetworkPermission() async {
+    try {
+      await _channel.invokeMethod('requestLocalNetworkPermission');
+    } catch (e) {
+      print('[LocalNetwork] 原生权限探测失败: $e');
+    }
+
+    RawDatagramSocket? socket;
+    try {
+      socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+      socket.broadcastEnabled = true;
+      socket.send(const [0], InternetAddress('224.0.0.251'), 5353);
+    } catch (e) {
+      print('[LocalNetwork] 多播探测失败: $e');
+    } finally {
+      socket?.close();
+    }
+  }
+
   /// 获取所有照片资源信息（通过原生通道）
   /// 返回 List<Map>，包含 localIdentifier, creationDate, mediaType, isLivePhoto
   static Future<List<Map<String, dynamic>>> fetchAllAssets() async {

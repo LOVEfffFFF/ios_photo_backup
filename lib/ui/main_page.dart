@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
+import '../helpers/photo_library_helper.dart';
 import '../managers/backup_manager.dart';
 import '../services/server_config.dart';
 import '../services/upload_client.dart';
@@ -130,8 +131,16 @@ class _MainPageState extends State<MainPage> {
     setState(() {
       _config = parsed;
       _connectionOk = false;
-      _connectionHint = '已保存，正在测试连接...';
+      _connectionHint = '正在请求本地网络权限，若弹出「允许访问本地网络」请点允许...';
       _testing = true;
+    });
+
+    // iOS 14+ 首次访问局域网必须授权，单播连接不足以触发系统询问，
+    // 这里主动做一次 Bonjour 探测把授权窗逼出来
+    await PhotoLibraryHelper.requestLocalNetworkPermission();
+    if (!mounted) return;
+    setState(() {
+      _connectionHint = '正在测试连接...';
     });
 
     final error = await UploadClient(parsed).testConnection();

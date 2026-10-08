@@ -29,7 +29,11 @@
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>此应用需要将备份的照片和视频恢复到您的相册中</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>此应用需要访问本地网络以提供 WiFi 文件传输服务</string>
+	<string>备份到电脑时需要访问本地网络，以连接你在电脑上运行的接收端服务</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_http._tcp</string>
+	</array>
 	<key>UIFileSharingEnabled</key>
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>

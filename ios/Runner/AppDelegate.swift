@@ -2,6 +2,7 @@ import UIKit
 import Flutter
 import Photos
 import UniformTypeIdentifiers
+import Network
 
 @UIApplicationMain
 @objc class AppDelegate: FlutterAppDelegate {
@@ -48,6 +49,8 @@ import UniformTypeIdentifiers
             saveVideoToLibrary(call: call, result: result)
         case "saveLivePhotoToLibrary":
             saveLivePhotoToLibrary(call: call, result: result)
+        case "requestLocalNetworkPermission":
+            requestLocalNetworkPermission(result: result)
         default:
             result(FlutterMethodNotImplemented)
         }
@@ -376,6 +379,42 @@ import UniformTypeIdentifiers
                     print("PhotoBackup: Save Live Photo failed: \(error)")
                 }
                 result(success)
+            }
+        }
+    }
+
+    // MARK: - 本地网络权限
+
+    private var bonjourBrowser: NWBrowser?
+
+    /// 主动触发 iOS 的「本地网络」授权询问。
+    ///
+    /// iOS 14 起访问局域网需要用户授权，但单纯的单播 TCP 连接不足以让系统
+    /// 弹出授权窗；未授权时连接会被沙盒直接丢弃，表现为
+    /// `No route to host, errno = 65`。发起一次 Bonjour 浏览是明确需要该权限
+    /// 的操作，可以稳定把系统询问逼出来。
+    private func requestLocalNetworkPermission(result: @escaping FlutterResult) {
+        DispatchQueue.main.async {
+            if self.bonjourBrowser != nil {
+                result(true)
+                return
+            }
+
+            let browser = NWBrowser(
+                for: .bonjour(type: "_http._tcp", domain: nil),
+                using: NWParameters()
+            )
+            self.bonjourBrowser = browser
+            browser.stateUpdateHandler = { state in
+                print("PhotoBackup: 本地网络权限探测状态: \(state)")
+            }
+            browser.start(queue: .main)
+
+            // 浏览 1.5 秒足以触发系统询问，之后主动收工
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                browser.cancel()
+                self.bonjourBrowser = nil
+                result(true)
             }
         }
     }
