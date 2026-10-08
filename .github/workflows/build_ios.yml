@@ -66,9 +66,19 @@ jobs:
             \t\t\tCODE_SIGNING_ALLOWED = NO;\
             \t\t\tCODE_SIGNING_REQUIRED = NO;\
             \t\t\tDEVELOPMENT_TEAM = "";' "$PBXPROJ"
+          # Xcode 26 起：即使带 --no-codesign，flutter 仍会校验 Development Team
+          # 而报「Building a deployable iOS app requires a selected Development Team」。
+          # 只改 pbxproj 不够，必须在 xcconfig 里也显式置空。
+          for CFG in ios/Flutter/Debug.xcconfig ios/Flutter/Release.xcconfig ios/Flutter/Profile.xcconfig; do
+            if [ -f "$CFG" ]; then
+              printf '\nDEVELOPMENT_TEAM =\nCODE_SIGN_IDENTITY =\nCODE_SIGNING_REQUIRED = NO\nCODE_SIGNING_ALLOWED = NO\n' >> "$CFG"
+            fi
+          done
           echo "=== Patched project.pbxproj ==="
           grep "IPHONEOS_DEPLOYMENT_TARGET" "$PBXPROJ" || true
           grep -c "CODE_SIGNING_ALLOWED = NO" "$PBXPROJ" || true
+          echo "=== Release.xcconfig 尾部 ==="
+          tail -5 ios/Flutter/Release.xcconfig || true
 
       - name: Build iOS App (Debug - for personal signing)
         if: github.event.inputs.build_type != 'release'
