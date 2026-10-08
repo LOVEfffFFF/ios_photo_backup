@@ -22,10 +22,10 @@ CONFIG="${1:-Release}"
 case "$CONFIG" in
   Debug|debug)     CONFIG=Debug ;;
   Release|release) CONFIG=Release ;;
-  *) echo "::error::未知构建配置: $CONFIG（只支持 Debug / Release）"; exit 1 ;;
+  *) echo "::error::未知构建配置: ${CONFIG}（只支持 Debug / Release）"; exit 1 ;;
 esac
 
-echo "=== 步骤 1/3：生成 Flutter 配置（$CONFIG）==="
+echo "=== 步骤 1/3：生成 Flutter 配置（${CONFIG}）==="
 # --config-only 只生成 iOS 工程配置，不编译、不校验 Team
 flutter build ios --config-only --no-codesign
 
