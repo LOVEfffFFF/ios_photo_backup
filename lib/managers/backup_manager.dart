@@ -481,6 +481,14 @@ class BackupManager {
     _isCancelled = true;
   }
 
+  /// 清空本机的备份记录（不影响服务器设置，也不动电脑上的文件）
+  ///
+  /// 重置后下次备份会重新核对全部照片；电脑上已存在的文件会被接收端
+  /// 按「同名同大小」识别并跳过，因此不会重复占用空间、也不会真的重传。
+  Future<void> resetRecords() async {
+    await _recordStore.clearAllRecords();
+  }
+
   /// 获取备份统计信息
   Future<Map<String, int>> getBackupStats() async {
     final records = await _recordStore.loadAllRecords();

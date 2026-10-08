@@ -298,6 +298,49 @@ class _MainPageState extends State<MainPage> {
     _addLog('操作已取消');
   }
 
+  /// 重置本机记录：清空「已备份 / 已恢复」状态，服务器设置保持不变
+  Future<void> _confirmResetRecords() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('重置备份记录？'),
+        content: const Text(
+          '将清除本机记录：哪些照片已备份、哪些已恢复到相册。\n\n'
+          '不会影响：\n'
+          '· 服务器设置（地址 / 密钥 / 数量上限）\n'
+          '· 电脑上已经收到的文件\n\n'
+          '重置后下次备份会重新核对全部照片；电脑上已存在的文件会被接收端'
+          '识别为「同名同大小」而跳过，不会重复占用空间。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('确认重置'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    try {
+      await _backupManager.resetRecords();
+      await _restoreManager.clearRestoreState();
+      if (!mounted) return;
+      setState(() {
+        _backedCount = 0;
+      });
+      _addLog('✅ 已重置本机记录（服务器设置保留），下次备份会重新核对全部照片');
+    } catch (e) {
+      _addLog('❌ 重置失败: $e');
+    }
+  }
+
   String _formatBytes(int bytes) {
     if (bytes >= 1024 * 1024 * 1024) {
       return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
@@ -595,6 +638,23 @@ class _MainPageState extends State<MainPage> {
             Text(
               '备份会跳过已传输的；恢复只导入尚未恢复过的照片，可重复点击不会重复导入。',
               style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+            ),
+            const Divider(height: 24),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: _isOperating ? null : _confirmResetRecords,
+                icon: const Icon(Icons.restart_alt, size: 18),
+                label: const Text('重置备份记录'),
+                style: TextButton.styleFrom(
+                  foregroundColor: Colors.orange.shade800,
+                  padding: EdgeInsets.zero,
+                ),
+              ),
+            ),
+            Text(
+              '清空本机记录，让下次备份重新核对全部照片（服务器设置保留）',
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
             ),
           ],
         ),

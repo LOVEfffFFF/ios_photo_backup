@@ -324,6 +324,20 @@ class RestoreManager {
     return File(p.join(docDir.path, 'restore_state.json'));
   }
 
+  /// 清空本机的恢复状态（哪些资产已经导回相册）
+  ///
+  /// 与备份记录一起重置，保证两侧状态一致。
+  Future<void> clearRestoreState() async {
+    try {
+      final file = await _stateFile();
+      if (await file.exists()) {
+        await file.delete();
+      }
+    } catch (e) {
+      print('[RestoreManager] 恢复状态清空失败: $e');
+    }
+  }
+
   /// 读取已恢复的 localIdentifier 集合
   Future<Set<String>> _loadRestoredIds() async {
     try {
