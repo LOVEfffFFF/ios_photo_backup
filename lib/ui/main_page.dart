@@ -1,11 +1,15 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
+import '../app_info.dart';
+import '../helpers/file_helper.dart';
 import '../helpers/photo_library_helper.dart';
 import '../managers/backup_manager.dart';
 import '../managers/restore_manager.dart';
+import '../managers/record_store.dart';
 import '../services/server_client.dart';
 import '../services/server_config.dart';
 
@@ -121,6 +125,91 @@ class _MainPageState extends State<MainPage> {
         );
       }
     });
+  }
+
+  /// 生成诊断报告：App 版本 + 本机记录状态 + 完整操作日志
+  ///
+  /// 排查问题时靠这个定位 —— 侧载没有版本提示，日志也只有手机上看得见，
+  /// 把它送到电脑上（或粘贴出来）就能精确定位是版本问题还是逻辑问题。
+  Future<String> _buildDiagnostics() async {
+    final sb = StringBuffer();
+    sb.writeln('=== PhotoBackup 诊断报告 ===');
+    sb.writeln('生成时间: ${DateTime.now().toString()}');
+    sb.writeln('App 版本: ${AppInfo.diagnostics}');
+    sb.writeln('服务器: ${_config.isConfigured ? _config.baseUrl : '未配置'}');
+    sb.writeln('本次上限: ${_parseLimit() == 0 ? '不限制' : '${_parseLimit()} 个'}');
+
+    // 本机记录状态：判断「沙盒是否丢过」的关键
+    try {
+      final store = RecordStore();
+      final records = await store.loadAllRecords();
+      final file = await FileHelper.getRecordsFile();
+      final exists = await file.exists();
+      final size = exists ? await file.length() : 0;
+      var modified = '不存在';
+      if (exists) {
+        modified = (await file.lastModified()).toString();
+      }
+      sb.writeln('--- 本机备份记录 ---');
+      sb.writeln('记录条数: ${records.length}');
+      sb.writeln('记录文件: ${exists ? '${file.path}' : '尚未创建'}');
+      sb.writeln('文件大小: $size 字节');
+      sb.writeln('最后修改: $modified');
+      if (records.isNotEmpty) {
+        final withPrints = records
+            .where((r) => r.pixelWidth != null && r.pixelHeight != null)
+            .length;
+        sb.writeln('含像素宽高的记录: $withPrints / ${records.length}'
+            '${withPrints == 0 ? '  ← 旧版 App 写的记录（无宽高，指纹会退化）' : ''}');
+        final inferredLive =
+            records.where((r) => r.mediaType == 'live_photo').length;
+        sb.writeln('其中实况照片: $inferredLive');
+      }
+    } catch (e) {
+      sb.writeln('读取本机记录失败: $e');
+    }
+
+    sb.writeln('--- 操作日志（最新在上，共 ${_logs.length} 条）---');
+    for (final line in _logs) {
+      sb.writeln(line);
+    }
+    return sb.toString();
+  }
+
+  /// 把诊断日志复制到剪贴板
+  Future<void> _copyDiagnostics() async {
+    final text = await _buildDiagnostics();
+    try {
+      await Clipboard.setData(ClipboardData(text: text));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('诊断日志已复制，可直接粘贴发送')),
+        );
+      }
+    } catch (e) {
+      _addLog('复制失败: $e');
+    }
+  }
+
+  /// 把诊断日志上传到电脑，保存为 app_diagnostics.log
+  Future<void> _uploadDiagnostics() async {
+    if (_isOperating) return;
+    if (!_config.isConfigured) {
+      _addLog('❌ 未配置服务器地址，无法上传日志');
+      return;
+    }
+    final text = await _buildDiagnostics();
+    setState(() => _testing = true);
+    _addLog('正在上传诊断日志到电脑...');
+    final client = ServerClient(_config);
+    final error = await client.uploadDiagnostics(text);
+    if (!mounted) return;
+    setState(() => _testing = false);
+    if (error == null) {
+      _addLog('✅ 诊断日志已上传到电脑：iPhoneBackup\\app_diagnostics.log');
+    } else {
+      _addLog('❌ 上传诊断日志失败：$error');
+    }
   }
 
   /// 解析输入框里的地址与数量上限，非法时返回 null
@@ -719,6 +808,48 @@ class _MainPageState extends State<MainPage> {
                     },
                     child: const Text('清空', style: TextStyle(fontSize: 13)),
                   ),
+              ],
+            ),
+            // ---- 版本标识 + 诊断日志导出 ----
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Flexible(
+                  child: Text(
+                    AppInfo.display,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: Colors.grey,
+                      fontFamily: 'monospace',
+                    ),
+                  ),
+                ),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextButton.icon(
+                      onPressed: _isOperating ? null : _copyDiagnostics,
+                      icon: const Icon(Icons.copy, size: 15),
+                      label: const Text('复制日志',
+                          style: TextStyle(fontSize: 12)),
+                      style: TextButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    ),
+                    TextButton.icon(
+                      onPressed: (_isOperating || _testing)
+                          ? null
+                          : _uploadDiagnostics,
+                      icon: const Icon(Icons.cloud_upload_outlined, size: 15),
+                      label: Text(_testing ? '上传中...' : '上传到电脑',
+                          style: const TextStyle(fontSize: 12)),
+                      style: TextButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    ),
+                  ],
+                ),
               ],
             ),
             const SizedBox(height: 8),

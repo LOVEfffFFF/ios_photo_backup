@@ -211,6 +211,52 @@ class ServerClient {
     }
   }
 
+  /// 把 App 端的诊断日志上传到电脑，追加保存为 app_diagnostics.log
+  ///
+  /// 用途：排查问题时手机上不方便取日志，让用户一键把完整的判断过程
+  /// （含 App 版本、记录状态、清单核对结果）送到电脑上留存。
+  /// 返回 null 表示成功，否则返回错误描述。
+  Future<String?> uploadDiagnostics(String content) async {
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 10);
+    try {
+      final request =
+          await client.postUrl(Uri.parse('${config.baseUrl}/diagnostics'));
+      if (config.token.isNotEmpty) {
+        request.headers.set('X-Auth-Token', config.token);
+      }
+      final bytes = utf8.encode(content);
+      request.headers.contentType = ContentType.text('plain', charset: 'utf-8');
+      request.contentLength = bytes.length;
+      request.add(bytes);
+
+      final response = await request.close().timeout(
+            const Duration(seconds: 30),
+          );
+      final body = await response.transform(utf8.decoder).join();
+      if (response.statusCode == 200) {
+        return null;
+      }
+      var message = 'HTTP ${response.statusCode}';
+      try {
+        final decoded = jsonDecode(body) as Map<String, dynamic>;
+        message = (decoded['message'] as String?) ?? message;
+      } catch (_) {
+        // 忽略
+      }
+      if (response.statusCode == 401) {
+        message = '鉴权失败：密钥与接收端不一致';
+      }
+      return message;
+    } on TimeoutException {
+      return '上传日志超时（接收端可能没启动）';
+    } catch (e) {
+      return '上传日志失败：$e';
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   /// 读取电脑上的元数据清单（manifest.jsonl）
   ///
   /// 返回解析后的条目列表；连接失败 / 非 200 时返回 null。
