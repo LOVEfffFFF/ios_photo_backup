@@ -36,7 +36,18 @@ jobs:
           cache: true
 
       - name: Verify Flutter installation
-        run: flutter --version
+        run: |
+          flutter --version
+          # 记录构建环境：排查「上次能编、这次编不过」时第一件事就是对比这段
+          # 详见工作区文档《CI构建踩坑与排查手册.md》
+          echo "===== BUILD ENVIRONMENT ====="
+          echo "runner.image : ${{ runner.os }} / ${{ runner.arch }}"
+          echo "runner.name  : ${{ runner.name }}"
+          xcodebuild -version
+          echo "sdk          : $(xcrun --sdk iphoneos --show-sdk-version)"
+          echo "macos        : $(sw_vers -productVersion)"
+          echo "FLUTTER_ROOT : $FLUTTER_ROOT"
+          echo "=============================="
 
       - name: Generate iOS project files
         run: |
