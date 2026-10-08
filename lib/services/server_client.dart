@@ -226,7 +226,9 @@ class ServerClient {
         request.headers.set('X-Auth-Token', config.token);
       }
       final bytes = utf8.encode(content);
-      request.headers.contentType = ContentType.text('plain', charset: 'utf-8');
+      // 直接写Content-Type 头：ContentType.text 需要两个位置参数
+      // （primaryType, subType），少写一个会编译失败
+      request.headers.set('Content-Type', 'text/plain; charset=utf-8');
       request.contentLength = bytes.length;
       request.add(bytes);
 
