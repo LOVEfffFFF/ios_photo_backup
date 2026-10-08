@@ -219,6 +219,7 @@ class BackupManager {
 
         var bytesThisAsset = 0;
         String? failure;
+        final assetStopwatch = Stopwatch()..start();
 
         try {
           if (mediaType == 'video') {
@@ -249,21 +250,27 @@ class BackupManager {
           failure = '$e';
         }
 
+        assetStopwatch.stop();
+
         if (bytesThisAsset > 0) {
           completed++;
           uploadedBytes += bytesThisAsset;
-          // 每传完一个文件就写一条日志
-          final doneName = pendingRecords.isNotEmpty
-              ? p.basename(pendingRecords.last.relativePath)
-              : localId;
+          // 每个文件一条日志：序号 / 文件名 / 类型 / 大小 / 耗时 / 服务器相对路径
+          final lastRecord =
+              pendingRecords.isNotEmpty ? pendingRecords.last : null;
+          final doneName =
+              lastRecord != null ? p.basename(lastRecord.relativePath) : localId;
           yield BackupProgress(
             completed: completed,
             total: total,
             percentage: total > 0 ? completed / total * 100 : 0,
             currentFile: doneName,
             uploadedBytes: uploadedBytes,
-            logMessage:
-                '✅ [$completed/$total] $doneName  ${_fmtBytes(bytesThisAsset)}',
+            logMessage: '✅ [$completed/$total] $doneName'
+                '｜${_mediaLabel(mediaType, isLivePhoto)}'
+                '｜${_fmtBytes(bytesThisAsset)}'
+                '｜${assetStopwatch.elapsedMilliseconds}ms'
+                '｜${lastRecord?.relativePath ?? localId}',
           );
           lastYieldAt = DateTime.now();
         } else if (failure == null) {
@@ -556,4 +563,20 @@ String _fmtBytes(int bytes) {
     return '${(bytes / 1024).toStringAsFixed(0)} KB';
   }
   return '$bytes B';
+}
+
+/// 媒体类型的中文标签（仅用于日志显示）
+String _mediaLabel(String mediaType, bool isLivePhoto) {
+  if (isLivePhoto) {
+    return '实况照片';
+  }
+  switch (mediaType) {
+    case 'video':
+      return '视频';
+    case 'image':
+    case 'photo':
+      return '照片';
+    default:
+      return mediaType;
+  }
 }

@@ -312,6 +312,8 @@ import Network
 
     // MARK: - 写入照片到相册
 
+    /// 写入照片。成功时返回「新资产的 localIdentifier」—— 恢复去重要靠它
+    /// 追踪「当初导入的那张现在还在不在相册」，失败返回 false。
     private func savePhotoToLibrary(call: FlutterMethodCall, result: @escaping FlutterResult) {
         guard let args = call.arguments as? [String: Any],
               let filePath = args["filePath"] as? String,
@@ -327,17 +329,23 @@ import Network
         }
 
         let creationDate = Date(timeIntervalSince1970: creationDateTimeInterval / 1000.0)
+        var newLocalIdentifier: String?
 
         PHPhotoLibrary.shared().performChanges {
             let request = PHAssetCreationRequest.forAsset()
             try? request.addResource(with: .photo, fileURL: fileURL, options: nil)
             request.creationDate = creationDate
+            newLocalIdentifier = request.placeholderForCreatedAsset?.localIdentifier
         } completionHandler: { success, error in
             DispatchQueue.main.async {
                 if let error = error {
                     print("PhotoBackup: Save photo failed: \(error)")
                 }
-                result(success)
+                if success, let identifier = newLocalIdentifier {
+                    result(identifier)
+                } else {
+                    result(false)
+                }
             }
         }
     }
@@ -359,17 +367,23 @@ import Network
         }
 
         let creationDate = Date(timeIntervalSince1970: creationDateTimeInterval / 1000.0)
+        var newLocalIdentifier: String?
 
         PHPhotoLibrary.shared().performChanges {
             let request = PHAssetCreationRequest.forAsset()
             try? request.addResource(with: .video, fileURL: fileURL, options: nil)
             request.creationDate = creationDate
+            newLocalIdentifier = request.placeholderForCreatedAsset?.localIdentifier
         } completionHandler: { success, error in
             DispatchQueue.main.async {
                 if let error = error {
                     print("PhotoBackup: Save video failed: \(error)")
                 }
-                result(success)
+                if success, let identifier = newLocalIdentifier {
+                    result(identifier)
+                } else {
+                    result(false)
+                }
             }
         }
     }
@@ -395,18 +409,24 @@ import Network
         }
 
         let creationDate = Date(timeIntervalSince1970: creationDateTimeInterval / 1000.0)
+        var newLocalIdentifier: String?
 
         PHPhotoLibrary.shared().performChanges {
             let request = PHAssetCreationRequest.forAsset()
             try? request.addResource(with: .photo, fileURL: photoURL, options: nil)
             try? request.addResource(with: .pairedVideo, fileURL: videoURL, options: nil)
             request.creationDate = creationDate
+            newLocalIdentifier = request.placeholderForCreatedAsset?.localIdentifier
         } completionHandler: { success, error in
             DispatchQueue.main.async {
                 if let error = error {
                     print("PhotoBackup: Save Live Photo failed: \(error)")
                 }
-                result(success)
+                if success, let identifier = newLocalIdentifier {
+                    result(identifier)
+                } else {
+                    result(false)
+                }
             }
         }
     }

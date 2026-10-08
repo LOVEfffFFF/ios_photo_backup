@@ -40,13 +40,31 @@ class RestoreProgress {
   });
 }
 
+/// 单条恢复的结果
+class _RestoreOutcome {
+  /// 写入相册后得到的新资产 localIdentifier（拿不到则为 null）
+  final String? newAssetId;
+
+  /// 本条下载的字节数
+  final int bytes;
+
+  _RestoreOutcome(this.newAssetId, this.bytes);
+}
+
 /// 把电脑上的备份拉回手机相册
 ///
-/// 流程：读备份记录 → 过滤出「尚未恢复」的 → 逐条下载到暂存目录 →
-/// 写入系统相册 → 删除暂存。
+/// **判断「要不要恢复」依据的是相册当前的实际状态，而不是历史记录**：
 ///
-/// 幂等性：已恢复的 localIdentifier 记录在 `restore_state.json`（NDJSON 追加写），
-/// 重复点击不会把同一张照片导入两次。
+/// | 情况 | 处理 |
+/// | --- | --- |
+/// | 原照片还在相册里 | 跳过 —— 根本不需要恢复 |
+/// | 原照片没了，但之前导入的那张还在 | 跳过 —— 避免重复导入 |
+/// | 原照片没了，之前导入的那张也被删了 | **重新恢复** ✓ |
+/// | 从未导入过，原照片也没了 | 恢复 |
+///
+/// 第 2、3 条依赖 `restore_state.json` 里记录的「导入后新资产的
+/// localIdentifier」—— 因为导入产出的是**新资产**，用原照片的 ID
+/// 判断不出「用户是不是把恢复出来的又删了」。
 class RestoreManager {
   final RecordStore _recordStore = RecordStore();
   bool _isRunning = false;
@@ -54,9 +72,6 @@ class RestoreManager {
 
   /// 每积累这么多条就刷一次恢复状态
   static const int _stateFlushThreshold = 20;
-
-  /// 进度上报的最小间隔
-  static const Duration _progressInterval = Duration(milliseconds: 300);
 
   bool get isRunning => _isRunning;
 
@@ -76,7 +91,7 @@ class RestoreManager {
     _isRunning = true;
     _isCancelled = false;
 
-    final restoredNow = <String>[];
+    final restoredNow = <String, String>{};
     var downloadedBytes = 0;
 
     try {
@@ -136,72 +151,67 @@ class RestoreManager {
         return;
       }
 
-      // 3. 过滤掉两类不需要恢复的：
-      //    a) 之前已经恢复过的（restore_state.json）
-      //    b) 相册里本来就还在的 —— 照片没删，不该从电脑再导一份回来
-      final alreadyRestored = await _loadRestoredIds();
-      final candidates = records
-          .where((r) => !alreadyRestored.contains(r.localIdentifier))
-          .toList();
+      // 3. 核对相册当前状态，决定哪些需要恢复
+      final state = await _loadRestoreState();
 
       yield RestoreProgress(
         completed: 0,
         total: records.length,
         percentage: 0,
-        currentFile: '正在核对相册中已有的照片...',
-        logMessage: '备份记录 ${records.length} 条｜其中已恢复过 ${records.length - candidates.length} 条｜'
-            '待核对 ${candidates.length} 条',
+        currentFile: '正在核对相册状态...',
+        logMessage: '备份记录 ${records.length} 条｜历史恢复记录 ${state.length} 条｜正在核对相册...',
       );
 
-      if (candidates.isEmpty) {
-        yield RestoreProgress(
-          completed: 0,
-          total: records.length,
-          percentage: 100,
-          currentFile: '所有备份记录都已恢复到相册，无需重复导入',
-          logMessage: '所有备份记录都已恢复过，无需重复导入',
-        );
-        return;
+      final originalStillThere = await PhotoLibraryHelper.filterExistingAssets(
+        records.map((r) => r.localIdentifier).toList(),
+      );
+      final restoredStillThere = await PhotoLibraryHelper.filterExistingAssets(
+        state.values.where((v) => v.isNotEmpty).toList(),
+      );
+
+      final pending = <BackupRecord>[];
+      var skippedOriginal = 0;
+      var skippedRestored = 0;
+
+      for (final record in records) {
+        if (originalStillThere.contains(record.localIdentifier)) {
+          skippedOriginal++;
+          continue;
+        }
+        final restoredAssetId = state[record.localIdentifier];
+        if (restoredAssetId != null &&
+            restoredStillThere.contains(restoredAssetId)) {
+          skippedRestored++;
+          continue;
+        }
+        pending.add(record);
       }
 
-      final stillInLibrary = await PhotoLibraryHelper.filterExistingAssets(
-        candidates.map((r) => r.localIdentifier).toList(),
+      yield RestoreProgress(
+        completed: 0,
+        total: records.length,
+        percentage: 0,
+        currentFile: '待恢复 ${pending.length} 条',
+        logMessage: '核对完成：原照片仍在相册 $skippedOriginal 条（跳过）｜'
+            '已导入且仍在相册 $skippedRestored 条（跳过）｜待恢复 ${pending.length} 条',
       );
-      final pending = candidates
-          .where((r) => !stillInLibrary.contains(r.localIdentifier))
-          .toList();
-      final skippedExisting = candidates.length - pending.length;
 
       if (pending.isEmpty) {
         yield RestoreProgress(
           completed: 0,
           total: records.length,
           percentage: 100,
-          currentFile: '相册里这些照片都还在，无需从电脑导入',
-          logMessage: '核对结果：这 $skippedExisting 张在相册里都还在，无需导入',
+          currentFile: '相册里该有的都还在，无需从电脑导入',
+          logMessage: '无需导入：所有记录对应的照片当前都已在相册中',
         );
         return;
       }
 
-      final total = pending.length;
-      yield RestoreProgress(
-        completed: 0,
-        total: total,
-        percentage: 0,
-        currentFile: skippedExisting > 0
-            ? '相册中仍有 $skippedExisting 个（已跳过），待恢复 $total 个，开始下载...'
-            : '待恢复 $total 个，开始下载...',
-        logMessage: skippedExisting > 0
-            ? '核对结果：相册中仍存在 $skippedExisting 张（跳过）｜待从电脑导入 $total 张'
-            : '核对结果：待从电脑导入 $total 张',
-      );
-
-      // 4. 逐条下载并写入相册
-      //    备份与恢复互斥运行，共用同一个暂存目录
+      // 4. 逐条下载并写入相册（备份与恢复互斥运行，共用同一个暂存目录）
       final tempDir = await FileHelper.getUploadTempDirectory();
       var completed = 0;
       var failed = 0;
-      var lastYieldAt = DateTime.now();
+      final total = pending.length;
 
       for (final record in pending) {
         if (_isCancelled) {
@@ -212,23 +222,27 @@ class RestoreManager {
             percentage: total > 0 ? completed / total * 100 : 0,
             currentFile: '已取消，已恢复 $completed 个',
             downloadedBytes: downloadedBytes,
+            logMessage: '恢复已取消：已完成 $completed 个',
           );
           return;
         }
 
-        var bytes = 0;
+        final stopwatch = Stopwatch()..start();
+        _RestoreOutcome? outcome;
         String? failure;
 
         try {
-          bytes = await _restoreOne(
+          outcome = await _restoreOne(
             client: client,
             tempDir: tempDir,
             record: record,
           );
-          if (bytes > 0) {
+          stopwatch.stop();
+
+          if (outcome.newAssetId != null) {
             completed++;
-            downloadedBytes += bytes;
-            restoredNow.add(record.localIdentifier);
+            downloadedBytes += outcome.bytes;
+            restoredNow[record.localIdentifier] = outcome.newAssetId!;
             if (restoredNow.length >= _stateFlushThreshold) {
               await _flushRestored(restoredNow);
             }
@@ -237,23 +251,26 @@ class RestoreManager {
             failure = '写入相册未成功';
           }
         } catch (e) {
+          stopwatch.stop();
           failed++;
           failure = '$e';
         }
 
-        if (failure == null) {
-          // 每恢复一个文件写一条日志
-          final doneName = p.basename(record.relativePath);
+        final fileName = p.basename(record.relativePath);
+        if (failure == null && outcome != null) {
+          // 每个文件一条日志：序号 / 文件名 / 类型 / 大小 / 耗时 / 相对路径
           yield RestoreProgress(
             completed: completed,
             total: total,
             percentage: total > 0 ? completed / total * 100 : 0,
-            currentFile: doneName,
+            currentFile: fileName,
             downloadedBytes: downloadedBytes,
-            logMessage:
-                '✅ [$completed/$total] $doneName  ${_fmtBytes(bytes)} → 已写入相册',
+            logMessage: '✅ [$completed/$total] $fileName'
+                '｜${_mediaLabel(record)}'
+                '｜${_fmtBytes(outcome.bytes)}'
+                '｜${stopwatch.elapsedMilliseconds}ms'
+                '｜${record.relativePath}',
           );
-          lastYieldAt = DateTime.now();
         } else {
           yield RestoreProgress(
             completed: completed,
@@ -262,10 +279,9 @@ class RestoreManager {
             currentFile: record.relativePath,
             error: failure,
             downloadedBytes: downloadedBytes,
-            logMessage: '❌ [$completed/$total] '
-                '${p.basename(record.relativePath)} —— $failure',
+            logMessage: '❌ [$completed/$total] $fileName —— $failure'
+                '（${record.relativePath}）',
           );
-          lastYieldAt = DateTime.now();
         }
       }
 
@@ -279,12 +295,10 @@ class RestoreManager {
         completed: completed,
         total: total,
         percentage: 100,
-        currentFile: skippedExisting > 0
-            ? '$summary（相册中已有 $skippedExisting 张，已跳过）'
-            : summary,
+        currentFile: summary,
         downloadedBytes: downloadedBytes,
         logMessage: '📊 $summary｜累计下载 ${_fmtBytes(downloadedBytes)}'
-            '${skippedExisting > 0 ? '｜相册中已存在的 $skippedExisting 张跳过未导入' : ''}',
+            '｜跳过：原图仍在相册 $skippedOriginal 条、已导入仍在 $skippedRestored 条',
       );
     } catch (e) {
       yield RestoreProgress(
@@ -302,8 +316,8 @@ class RestoreManager {
 
   /// 恢复单条记录：下载（含 Live Photo 配对视频）→ 写入相册 → 清理暂存
   ///
-  /// 返回下载的总字节数；失败抛异常
-  Future<int> _restoreOne({
+  /// 返回写入相册产生的新资产 ID 与下载字节数；失败抛异常
+  Future<_RestoreOutcome> _restoreOne({
     required ServerClient client,
     required Directory tempDir,
     required BackupRecord record,
@@ -340,30 +354,30 @@ class RestoreManager {
         }
       }
 
-      // 写入系统相册（原生侧按内容判断类型，扩展名已与实际格式一致）
-      bool ok;
+      // 写入系统相册，拿到新资产的 localIdentifier
+      String? newAssetId;
       if (record.mediaType == 'video') {
-        ok = await PhotoLibraryHelper.saveVideoToLibrary(
+        newAssetId = await PhotoLibraryHelper.saveVideoToLibrary(
           filePath: mainPath,
           creationDate: record.creationDate,
         );
       } else if (videoPath != null) {
-        ok = await PhotoLibraryHelper.saveLivePhotoToLibrary(
+        newAssetId = await PhotoLibraryHelper.saveLivePhotoToLibrary(
           photoPath: mainPath,
           videoPath: videoPath,
           creationDate: record.creationDate,
         );
       } else {
-        ok = await PhotoLibraryHelper.savePhotoToLibrary(
+        newAssetId = await PhotoLibraryHelper.savePhotoToLibrary(
           filePath: mainPath,
           creationDate: record.creationDate,
         );
       }
 
-      if (!ok) {
+      if (newAssetId == null) {
         throw Exception('写入相册失败');
       }
-      return totalBytes;
+      return _RestoreOutcome(newAssetId, totalBytes);
     } finally {
       await _safeDelete(File(mainPath));
       if (videoPath != null) {
@@ -379,9 +393,7 @@ class RestoreManager {
     return File(p.join(docDir.path, 'restore_state.json'));
   }
 
-  /// 清空本机的恢复状态（哪些资产已经导回相册）
-  ///
-  /// 与备份记录一起重置，保证两侧状态一致。
+  /// 清空本机的恢复状态（与备份记录一起重置，保证两侧一致）
   Future<void> clearRestoreState() async {
     try {
       final file = await _stateFile();
@@ -393,15 +405,15 @@ class RestoreManager {
     }
   }
 
-  /// 读取已恢复的 localIdentifier 集合
-  Future<Set<String>> _loadRestoredIds() async {
+  /// 读取「原资产 ID → 导入后新资产 ID」的映射
+  Future<Map<String, String>> _loadRestoreState() async {
+    final result = <String, String>{};
     try {
       final file = await _stateFile();
       if (!await file.exists()) {
-        return <String>{};
+        return result;
       }
       final content = await file.readAsString();
-      final ids = <String>{};
       for (final line in content.split('\n')) {
         final trimmed = line.trim();
         if (trimmed.isEmpty) {
@@ -410,32 +422,35 @@ class RestoreManager {
         try {
           final decoded = jsonDecode(trimmed) as Map<String, dynamic>;
           final id = decoded['localIdentifier'] as String?;
-          if (id != null) {
-            ids.add(id);
+          final newId = decoded['restoredAssetId'] as String?;
+          if (id != null && newId != null && newId.isNotEmpty) {
+            // 后写入的覆盖先前的（同一原资产只关心最新一次导入）
+            result[id] = newId;
           }
         } catch (e) {
           print('[RestoreManager] 跳过损坏的恢复状态行: $e');
         }
       }
-      return ids;
     } catch (e) {
       print('[RestoreManager] 恢复状态读取失败: $e');
-      return <String>{};
     }
+    return result;
   }
 
   /// 批量追加恢复状态（NDJSON 追加写）
-  Future<void> _flushRestored(List<String> ids) async {
-    if (ids.isEmpty) {
+  Future<void> _flushRestored(Map<String, String> restored) async {
+    if (restored.isEmpty) {
       return;
     }
     try {
       final file = await _stateFile();
       final buffer = StringBuffer();
-      for (final id in ids) {
+      final now = DateTime.now().toIso8601String();
+      for (final entry in restored.entries) {
         buffer.writeln(jsonEncode({
-          'localIdentifier': id,
-          'restoredAt': DateTime.now().toIso8601String(),
+          'localIdentifier': entry.key,
+          'restoredAssetId': entry.value,
+          'restoredAt': now,
         }));
       }
       await file.writeAsString(
@@ -443,7 +458,7 @@ class RestoreManager {
         mode: FileMode.append,
         flush: true,
       );
-      ids.clear();
+      restored.clear();
     } catch (e) {
       print('[RestoreManager] 恢复状态落盘失败，稍后重试: $e');
     }
@@ -477,4 +492,19 @@ String _fmtBytes(int bytes) {
     return '${(bytes / 1024).toStringAsFixed(0)} KB';
   }
   return '$bytes B';
+}
+
+/// 媒体类型的中文标签（仅用于日志显示）
+String _mediaLabel(BackupRecord record) {
+  switch (record.mediaType) {
+    case 'video':
+      return '视频';
+    case 'live_photo':
+      return '实况照片';
+    case 'image':
+    case 'photo':
+      return '照片';
+    default:
+      return record.mediaType;
+  }
 }

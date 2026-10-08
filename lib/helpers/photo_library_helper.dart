@@ -153,7 +153,9 @@ class PhotoLibraryHelper {
   /// 将照片写入系统相册
   /// [filePath] 照片文件路径
   /// [creationDate] 原始拍摄时间
-  static Future<bool> savePhotoToLibrary({
+  ///
+  /// 返回新资产的 localIdentifier（用于追踪「导入的这张还在不在相册」），失败返回 null
+  static Future<String?> savePhotoToLibrary({
     required String filePath,
     required DateTime creationDate,
   }) async {
@@ -162,14 +164,19 @@ class PhotoLibraryHelper {
         'filePath': filePath,
         'creationDate': creationDate.millisecondsSinceEpoch,
       });
-      return result == true;
+      if (result is String) {
+        return result;
+      }
+      return null;
     } catch (e) {
-      return false;
+      return null;
     }
   }
 
   /// 将视频写入系统相册
-  static Future<bool> saveVideoToLibrary({
+  ///
+  /// 返回新资产的 localIdentifier，失败返回 null
+  static Future<String?> saveVideoToLibrary({
     required String filePath,
     required DateTime creationDate,
   }) async {
@@ -178,14 +185,19 @@ class PhotoLibraryHelper {
         'filePath': filePath,
         'creationDate': creationDate.millisecondsSinceEpoch,
       });
-      return result == true;
+      if (result is String) {
+        return result;
+      }
+      return null;
     } catch (e) {
-      return false;
+      return null;
     }
   }
 
   /// 将 Live Photo（图片+视频）写入系统相册
-  static Future<bool> saveLivePhotoToLibrary({
+  ///
+  /// 返回新资产的 localIdentifier，失败返回 null
+  static Future<String?> saveLivePhotoToLibrary({
     required String photoPath,
     required String videoPath,
     required DateTime creationDate,
@@ -196,9 +208,12 @@ class PhotoLibraryHelper {
         'videoPath': videoPath,
         'creationDate': creationDate.millisecondsSinceEpoch,
       });
-      return result == true;
+      if (result is String) {
+        return result;
+      }
+      return null;
     } catch (e) {
-      return false;
+      return null;
     }
   }
 }
