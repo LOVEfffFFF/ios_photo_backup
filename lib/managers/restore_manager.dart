@@ -123,13 +123,15 @@ class RestoreManager {
         return;
       }
 
-      // 3. 过滤已恢复的
+      // 3. 过滤掉两类不需要恢复的：
+      //    a) 之前已经恢复过的（restore_state.json）
+      //    b) 相册里本来就还在的 —— 照片没删，不该从电脑再导一份回来
       final alreadyRestored = await _loadRestoredIds();
-      final pending = records
+      final candidates = records
           .where((r) => !alreadyRestored.contains(r.localIdentifier))
           .toList();
 
-      if (pending.isEmpty) {
+      if (candidates.isEmpty) {
         yield RestoreProgress(
           completed: 0,
           total: records.length,
@@ -139,12 +141,39 @@ class RestoreManager {
         return;
       }
 
+      yield RestoreProgress(
+        completed: 0,
+        total: candidates.length,
+        percentage: 0,
+        currentFile: '正在核对相册中已有的照片...',
+      );
+
+      final stillInLibrary = await PhotoLibraryHelper.filterExistingAssets(
+        candidates.map((r) => r.localIdentifier).toList(),
+      );
+      final pending = candidates
+          .where((r) => !stillInLibrary.contains(r.localIdentifier))
+          .toList();
+      final skippedExisting = candidates.length - pending.length;
+
+      if (pending.isEmpty) {
+        yield RestoreProgress(
+          completed: 0,
+          total: records.length,
+          percentage: 100,
+          currentFile: '相册里这些照片都还在，无需从电脑导入',
+        );
+        return;
+      }
+
       final total = pending.length;
       yield RestoreProgress(
         completed: 0,
         total: total,
         percentage: 0,
-        currentFile: '待恢复 $total 个，开始下载...',
+        currentFile: skippedExisting > 0
+            ? '相册中仍有 $skippedExisting 个（已跳过），待恢复 $total 个，开始下载...'
+            : '待恢复 $total 个，开始下载...',
       );
 
       // 4. 逐条下载并写入相册
@@ -228,7 +257,9 @@ class RestoreManager {
         percentage: 100,
         currentFile: failed > 0
             ? '恢复结束：成功 $completed 个，失败 $failed 个'
-            : '恢复完成：共导入 $completed 个到相册',
+            : (skippedExisting > 0
+                ? '恢复完成：导入 $completed 个（相册中已存在 $skippedExisting 个，已跳过）'
+                : '恢复完成：共导入 $completed 个到相册'),
         downloadedBytes: downloadedBytes,
       );
     } catch (e) {

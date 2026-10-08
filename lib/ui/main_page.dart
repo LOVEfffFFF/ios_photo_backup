@@ -636,7 +636,8 @@ class _MainPageState extends State<MainPage> {
             ],
             const SizedBox(height: 8),
             Text(
-              '备份会跳过已传输的；恢复只导入尚未恢复过的照片，可重复点击不会重复导入。',
+              '备份会跳过已传过的；恢复只把「相册里已经没有了」的照片导回来，'
+              '照片还在手机上的不会重复导入。',
               style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
             ),
             const Divider(height: 24),

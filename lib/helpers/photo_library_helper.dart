@@ -49,6 +49,30 @@ class PhotoLibraryHelper {
     }
   }
 
+  /// 批量查询这些 localIdentifier 是否仍然存在于相册中
+  ///
+  /// 恢复前用它跳过「照片本来就没删」的条目 —— 否则同一台手机上恢复
+  /// 会把还在相册里的照片又导入一份，变成重复。
+  /// 返回：仍然存在于相册中的 localIdentifier 集合。
+  static Future<Set<String>> filterExistingAssets(
+    List<String> localIdentifiers,
+  ) async {
+    if (localIdentifiers.isEmpty) {
+      return <String>{};
+    }
+    try {
+      final result = await _channel.invokeMethod('checkAssetsExist', {
+        'localIdentifiers': localIdentifiers,
+      });
+      if (result is List) {
+        return result.map((e) => e.toString()).toSet();
+      }
+    } catch (e) {
+      print('[PhotoLibrary] 查询相册资产失败: $e');
+    }
+    return <String>{};
+  }
+
   /// 获取所有照片资源信息（通过原生通道）
   /// 返回 List<Map>，包含 localIdentifier, creationDate, mediaType, isLivePhoto
   static Future<List<Map<String, dynamic>>> fetchAllAssets() async {

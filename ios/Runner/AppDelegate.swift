@@ -51,8 +51,36 @@ import Network
             saveLivePhotoToLibrary(call: call, result: result)
         case "requestLocalNetworkPermission":
             requestLocalNetworkPermission(result: result)
+        case "checkAssetsExist":
+            checkAssetsExist(call: call, result: result)
         default:
             result(FlutterMethodNotImplemented)
+        }
+    }
+
+    // MARK: - 查询相册资产是否仍存在
+
+    /// 批量查询给定的 localIdentifier 是否还在相册中。
+    /// 恢复前用它跳过「照片本来就没删」的条目，避免把同一张照片重复导入。
+    private func checkAssetsExist(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let args = call.arguments as? [String: Any],
+              let ids = args["localIdentifiers"] as? [String] else {
+            result([])
+            return
+        }
+
+        PHPhotoLibrary.requestAuthorization { status in
+            guard self.isPhotoLibraryAccessGranted(status) else {
+                DispatchQueue.main.async { result([]) }
+                return
+            }
+
+            let fetchResult = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
+            var existing: [String] = []
+            fetchResult.enumerateObjects { asset, _, _ in
+                existing.append(asset.localIdentifier)
+            }
+            DispatchQueue.main.async { result(existing) }
         }
     }
 
