@@ -1,0 +1,8 @@
+# Shell 脚本必须保持 LF：CRLF 会让 bash 把 "CONFIG\r" 当成另一个变量名，
+# 表现为 `unbound variable`。在 Windows 上开发时尤其容易踩到。
+*.sh text eol=lf
+
+# workflow 与 Dart 源码在 Windows 上开发，保持 CRLF 以免 diff 噪声
+*.yml text eol=crlf
+*.dart text eol=crlf
+*.ps1 text eol=crlf
