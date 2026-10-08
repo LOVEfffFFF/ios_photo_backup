@@ -25,6 +25,12 @@ class BackupProgress {
   /// 本次累计上传的字节数
   final int uploadedBytes;
 
+  /// 需要写进操作日志的详细信息
+  ///
+  /// 与 [currentFile] 的区别：currentFile 只刷新进度条文字，
+  /// 而 logMessage 会往日志框里追加一条记录（逐文件的结果都在这里）。
+  final String? logMessage;
+
   BackupProgress({
     required this.completed,
     required this.total,
@@ -33,6 +39,7 @@ class BackupProgress {
     this.error,
     this.fatal = false,
     this.uploadedBytes = 0,
+    this.logMessage,
   });
 }
 
@@ -96,6 +103,7 @@ class BackupManager {
         total: 0,
         percentage: 0,
         currentFile: '正在连接 ${config.displayAddress} ...',
+        logMessage: '开始备份 → ${config.baseUrl}',
       );
 
       final connError = await client.testConnection();
@@ -110,6 +118,14 @@ class BackupManager {
         return;
       }
 
+      yield BackupProgress(
+        completed: 0,
+        total: 0,
+        percentage: 0,
+        currentFile: '服务器连接正常',
+        logMessage: '服务器连接正常（${config.displayAddress}）',
+      );
+
       // 2. 清理上次异常退出遗留的暂存文件
       final cleaned = await FileHelper.cleanUploadTemp();
       if (cleaned > 0) {
@@ -122,6 +138,7 @@ class BackupManager {
         total: 0,
         percentage: 0,
         currentFile: '正在扫描相册...',
+        logMessage: '正在扫描相册...',
       );
 
       final assets = await PhotoLibraryHelper.fetchAllAssets();
@@ -150,6 +167,8 @@ class BackupManager {
           total: assets.length,
           percentage: 100,
           currentFile: '所有照片均已备份，无需重复传输',
+          logMessage:
+              '相册共 ${assets.length} 个资产，全部已备份（本地记录 ${backedRecords.length} 条）',
         );
         return;
       }
@@ -167,6 +186,8 @@ class BackupManager {
         currentFile: limit > 0 && remaining > total
             ? '本次上限 $total 个（共 $remaining 个待备份），开始传输...'
             : '待备份 $total 个，开始传输...',
+        logMessage: '相册共 ${assets.length} 个资产｜已备份 ${assets.length - remaining} 个｜'
+            '本次待传 $total 个${remaining > total ? '（另有 ${remaining - total} 个留待下次）' : ''}',
       );
 
       // 5. 逐个导出并上传
@@ -231,12 +252,26 @@ class BackupManager {
         if (bytesThisAsset > 0) {
           completed++;
           uploadedBytes += bytesThisAsset;
+          // 每传完一个文件就写一条日志
+          final doneName = pendingRecords.isNotEmpty
+              ? p.basename(pendingRecords.last.relativePath)
+              : localId;
+          yield BackupProgress(
+            completed: completed,
+            total: total,
+            percentage: total > 0 ? completed / total * 100 : 0,
+            currentFile: doneName,
+            uploadedBytes: uploadedBytes,
+            logMessage:
+                '✅ [$completed/$total] $doneName  ${_fmtBytes(bytesThisAsset)}',
+          );
+          lastYieldAt = DateTime.now();
         } else if (failure == null) {
           failed++;
           failure = '导出或上传未成功';
         }
 
-        // 单张失败立即上报（不节流），让用户及时看到是哪个文件出了问题
+        // 失败的也要能看到具体是哪一个
         if (failure != null) {
           yield BackupProgress(
             completed: completed,
@@ -245,6 +280,8 @@ class BackupManager {
             currentFile: localId,
             error: failure,
             uploadedBytes: uploadedBytes,
+            logMessage:
+                '❌ [$completed/$total] $localId —— $failure',
           );
           lastYieldAt = DateTime.now();
         }
@@ -252,36 +289,23 @@ class BackupManager {
         if (pendingRecords.length >= _recordFlushThreshold) {
           await _flushRecords(pendingRecords);
         }
-
-        // 进度按时间节流
-        final now = DateTime.now();
-        if (now.difference(lastYieldAt) >= _progressInterval) {
-          lastYieldAt = now;
-          yield BackupProgress(
-            completed: completed,
-            total: total,
-            percentage: total > 0 ? completed / total * 100 : 0,
-            currentFile: p.basename(
-              pendingRecords.isNotEmpty
-                  ? pendingRecords.last.relativePath
-                  : localId,
-            ),
-            uploadedBytes: uploadedBytes,
-          );
-        }
       }
 
       // 6. 收尾
       await _flushRecords(pendingRecords);
 
+      final summary = failed > 0
+          ? '备份结束：成功 $completed 个，失败 $failed 个'
+          : '备份完成：共传输 $completed 个文件';
       yield BackupProgress(
         completed: completed,
         total: total,
         percentage: 100,
-        currentFile: failed > 0
-            ? '备份结束：成功 $completed 个，失败 $failed 个'
-            : '备份完成：共传输 $completed 个文件',
+        currentFile: summary,
         uploadedBytes: uploadedBytes,
+        logMessage: '📊 $summary｜累计传输 ${_fmtBytes(uploadedBytes)}'
+            '${limit > 0 ? '｜本次上限 $limit 个' : ''}'
+            '${remaining > total ? '｜另有 ${remaining - total} 个留待下次' : ''}',
       );
     } catch (e) {
       yield BackupProgress(
@@ -518,4 +542,18 @@ class BackupManager {
       'livePhotos': livePhotos,
     };
   }
+}
+
+/// 字节数格式化（仅用于日志显示）
+String _fmtBytes(int bytes) {
+  if (bytes >= 1024 * 1024 * 1024) {
+    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+  }
+  if (bytes >= 1024 * 1024) {
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+  if (bytes >= 1024) {
+    return '${(bytes / 1024).toStringAsFixed(0)} KB';
+  }
+  return '$bytes B';
 }

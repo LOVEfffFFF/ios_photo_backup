@@ -25,6 +25,9 @@ class RestoreProgress {
   /// 本次累计下载的字节数
   final int downloadedBytes;
 
+  /// 需要写进操作日志的详细信息（逐文件结果都在这里，null 表示仅刷新进度）
+  final String? logMessage;
+
   RestoreProgress({
     required this.completed,
     required this.total,
@@ -33,6 +36,7 @@ class RestoreProgress {
     this.error,
     this.fatal = false,
     this.downloadedBytes = 0,
+    this.logMessage,
   });
 }
 
@@ -96,6 +100,7 @@ class RestoreManager {
         total: 0,
         percentage: 0,
         currentFile: '正在连接 ${config.displayAddress} ...',
+        logMessage: '开始恢复 ← ${config.baseUrl}',
       );
 
       final connError = await client.testConnection();
@@ -109,6 +114,14 @@ class RestoreManager {
         );
         return;
       }
+
+      yield RestoreProgress(
+        completed: 0,
+        total: 0,
+        percentage: 0,
+        currentFile: '服务器连接正常',
+        logMessage: '服务器连接正常（${config.displayAddress}）',
+      );
 
       // 2. 备份记录
       final records = await _recordStore.loadAllRecords();
@@ -131,22 +144,25 @@ class RestoreManager {
           .where((r) => !alreadyRestored.contains(r.localIdentifier))
           .toList();
 
+      yield RestoreProgress(
+        completed: 0,
+        total: records.length,
+        percentage: 0,
+        currentFile: '正在核对相册中已有的照片...',
+        logMessage: '备份记录 ${records.length} 条｜其中已恢复过 ${records.length - candidates.length} 条｜'
+            '待核对 ${candidates.length} 条',
+      );
+
       if (candidates.isEmpty) {
         yield RestoreProgress(
           completed: 0,
           total: records.length,
           percentage: 100,
           currentFile: '所有备份记录都已恢复到相册，无需重复导入',
+          logMessage: '所有备份记录都已恢复过，无需重复导入',
         );
         return;
       }
-
-      yield RestoreProgress(
-        completed: 0,
-        total: candidates.length,
-        percentage: 0,
-        currentFile: '正在核对相册中已有的照片...',
-      );
 
       final stillInLibrary = await PhotoLibraryHelper.filterExistingAssets(
         candidates.map((r) => r.localIdentifier).toList(),
@@ -162,6 +178,7 @@ class RestoreManager {
           total: records.length,
           percentage: 100,
           currentFile: '相册里这些照片都还在，无需从电脑导入',
+          logMessage: '核对结果：这 $skippedExisting 张在相册里都还在，无需导入',
         );
         return;
       }
@@ -174,6 +191,9 @@ class RestoreManager {
         currentFile: skippedExisting > 0
             ? '相册中仍有 $skippedExisting 个（已跳过），待恢复 $total 个，开始下载...'
             : '待恢复 $total 个，开始下载...',
+        logMessage: skippedExisting > 0
+            ? '核对结果：相册中仍存在 $skippedExisting 张（跳过）｜待从电脑导入 $total 张'
+            : '核对结果：待从电脑导入 $total 张',
       );
 
       // 4. 逐条下载并写入相册
@@ -221,8 +241,20 @@ class RestoreManager {
           failure = '$e';
         }
 
-        // 单条失败立即上报
-        if (failure != null) {
+        if (failure == null) {
+          // 每恢复一个文件写一条日志
+          final doneName = p.basename(record.relativePath);
+          yield RestoreProgress(
+            completed: completed,
+            total: total,
+            percentage: total > 0 ? completed / total * 100 : 0,
+            currentFile: doneName,
+            downloadedBytes: downloadedBytes,
+            logMessage:
+                '✅ [$completed/$total] $doneName  ${_fmtBytes(bytes)} → 已写入相册',
+          );
+          lastYieldAt = DateTime.now();
+        } else {
           yield RestoreProgress(
             completed: completed,
             total: total,
@@ -230,37 +262,29 @@ class RestoreManager {
             currentFile: record.relativePath,
             error: failure,
             downloadedBytes: downloadedBytes,
+            logMessage: '❌ [$completed/$total] '
+                '${p.basename(record.relativePath)} —— $failure',
           );
           lastYieldAt = DateTime.now();
-        }
-
-        // 进度节流
-        final now = DateTime.now();
-        if (now.difference(lastYieldAt) >= _progressInterval) {
-          lastYieldAt = now;
-          yield RestoreProgress(
-            completed: completed,
-            total: total,
-            percentage: total > 0 ? completed / total * 100 : 0,
-            currentFile: p.basename(record.relativePath),
-            downloadedBytes: downloadedBytes,
-          );
         }
       }
 
       // 5. 收尾
       await _flushRestored(restoredNow);
 
+      final summary = failed > 0
+          ? '恢复结束：成功 $completed 个，失败 $failed 个'
+          : '恢复完成：共导入 $completed 个到相册';
       yield RestoreProgress(
         completed: completed,
         total: total,
         percentage: 100,
-        currentFile: failed > 0
-            ? '恢复结束：成功 $completed 个，失败 $failed 个'
-            : (skippedExisting > 0
-                ? '恢复完成：导入 $completed 个（相册中已存在 $skippedExisting 个，已跳过）'
-                : '恢复完成：共导入 $completed 个到相册'),
+        currentFile: skippedExisting > 0
+            ? '$summary（相册中已有 $skippedExisting 张，已跳过）'
+            : summary,
         downloadedBytes: downloadedBytes,
+        logMessage: '📊 $summary｜累计下载 ${_fmtBytes(downloadedBytes)}'
+            '${skippedExisting > 0 ? '｜相册中已存在的 $skippedExisting 张跳过未导入' : ''}',
       );
     } catch (e) {
       yield RestoreProgress(
@@ -439,4 +463,18 @@ class RestoreManager {
   void cancel() {
     _isCancelled = true;
   }
+}
+
+/// 字节数格式化（仅用于日志显示）
+String _fmtBytes(int bytes) {
+  if (bytes >= 1024 * 1024 * 1024) {
+    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+  }
+  if (bytes >= 1024 * 1024) {
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+  if (bytes >= 1024) {
+    return '${(bytes / 1024).toStringAsFixed(0)} KB';
+  }
+  return '$bytes B';
 }

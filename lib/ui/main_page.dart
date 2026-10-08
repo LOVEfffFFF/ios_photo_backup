@@ -107,7 +107,7 @@ class _MainPageState extends State<MainPage> {
         '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}';
     setState(() {
       _logs.insert(0, '[$time] $message');
-      if (_logs.length > 200) {
+      if (_logs.length > 500) {
         _logs.removeLast();
       }
     });
@@ -204,7 +204,9 @@ class _MainPageState extends State<MainPage> {
         });
 
         // 单文件失败只记日志，不中断整批（fatal 才是终止信号）
-        if (progress.error != null) {
+        if (progress.logMessage != null) {
+          _addLog(progress.logMessage!);
+        } else if (progress.error != null) {
           _addLog(progress.fatal ? '❌ ${progress.error}' : '⚠️ ${progress.error}');
         }
 
@@ -254,7 +256,9 @@ class _MainPageState extends State<MainPage> {
           }
         });
 
-        if (progress.error != null) {
+        if (progress.logMessage != null) {
+          _addLog(progress.logMessage!);
+        } else if (progress.error != null) {
           _addLog(progress.fatal ? '❌ ${progress.error}' : '⚠️ ${progress.error}');
         }
 
@@ -719,7 +723,7 @@ class _MainPageState extends State<MainPage> {
             ),
             const SizedBox(height: 8),
             Container(
-              height: 200,
+              height: 260,
               decoration: BoxDecoration(
                 color: const Color(0xFF1E1E1E),
                 borderRadius: BorderRadius.circular(8),
