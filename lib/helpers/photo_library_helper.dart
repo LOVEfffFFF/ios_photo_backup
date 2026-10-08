@@ -157,12 +157,13 @@ class PhotoLibraryHelper {
   /// 返回新资产的 localIdentifier（用于追踪「导入的这张还在不在相册」），失败返回 null
   static Future<String?> savePhotoToLibrary({
     required String filePath,
-    required DateTime creationDate,
+    required double creationTimestamp,
   }) async {
     try {
       final result = await _channel.invokeMethod('savePhotoToLibrary', {
         'filePath': filePath,
-        'creationDate': creationDate.millisecondsSinceEpoch,
+        // 原生侧按毫秒解析；这里传 Double 以保留亚秒精度，避免同秒照片顺序错乱
+        'creationDate': creationTimestamp * 1000,
       });
       if (result is String) {
         return result;
@@ -178,12 +179,12 @@ class PhotoLibraryHelper {
   /// 返回新资产的 localIdentifier，失败返回 null
   static Future<String?> saveVideoToLibrary({
     required String filePath,
-    required DateTime creationDate,
+    required double creationTimestamp,
   }) async {
     try {
       final result = await _channel.invokeMethod('saveVideoToLibrary', {
         'filePath': filePath,
-        'creationDate': creationDate.millisecondsSinceEpoch,
+        'creationDate': creationTimestamp * 1000,
       });
       if (result is String) {
         return result;
@@ -200,13 +201,13 @@ class PhotoLibraryHelper {
   static Future<String?> saveLivePhotoToLibrary({
     required String photoPath,
     required String videoPath,
-    required DateTime creationDate,
+    required double creationTimestamp,
   }) async {
     try {
       final result = await _channel.invokeMethod('saveLivePhotoToLibrary', {
         'photoPath': photoPath,
         'videoPath': videoPath,
-        'creationDate': creationDate.millisecondsSinceEpoch,
+        'creationDate': creationTimestamp * 1000,
       });
       if (result is String) {
         return result;

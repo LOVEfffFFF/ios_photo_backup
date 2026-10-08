@@ -212,6 +212,8 @@ class RestoreManager {
       var completed = 0;
       var failed = 0;
       final total = pending.length;
+      // 记录每个时间戳已出现的次数，用于给同一时刻的照片分配微秒级偏移
+      final timestampSeen = <String, int>{};
 
       for (final record in pending) {
         if (_isCancelled) {
@@ -231,11 +233,20 @@ class RestoreManager {
         _RestoreOutcome? outcome;
         String? failure;
 
+        // 同一时间戳的多张照片，按备份记录里的先后顺序加微秒级偏移，
+        // 保证恢复后它们在相册中的相对次序与原相册一致、且每次结果可复现
+        final timestampKey = record.creationTimestamp.toStringAsFixed(6);
+        final duplicateIndex = timestampSeen[timestampKey] ?? 0;
+        timestampSeen[timestampKey] = duplicateIndex + 1;
+        final effectiveTimestamp =
+            record.creationTimestamp + duplicateIndex * 0.000001;
+
         try {
           outcome = await _restoreOne(
             client: client,
             tempDir: tempDir,
             record: record,
+            effectiveTimestamp: effectiveTimestamp,
           );
           stopwatch.stop();
 
@@ -321,6 +332,7 @@ class RestoreManager {
     required ServerClient client,
     required Directory tempDir,
     required BackupRecord record,
+    required double effectiveTimestamp,
   }) async {
     final mainName = p.basename(record.relativePath);
     final mainPath = p.join(tempDir.path, mainName);
@@ -359,18 +371,18 @@ class RestoreManager {
       if (record.mediaType == 'video') {
         newAssetId = await PhotoLibraryHelper.saveVideoToLibrary(
           filePath: mainPath,
-          creationDate: record.creationDate,
+          creationTimestamp: effectiveTimestamp,
         );
       } else if (videoPath != null) {
         newAssetId = await PhotoLibraryHelper.saveLivePhotoToLibrary(
           photoPath: mainPath,
           videoPath: videoPath,
-          creationDate: record.creationDate,
+          creationTimestamp: effectiveTimestamp,
         );
       } else {
         newAssetId = await PhotoLibraryHelper.savePhotoToLibrary(
           filePath: mainPath,
-          creationDate: record.creationDate,
+          creationTimestamp: effectiveTimestamp,
         );
       }
 

@@ -211,6 +211,8 @@ class BackupManager {
 
         final localId = asset['localIdentifier'] as String;
         final creationSeconds = asset['creationDate'] as num;
+        // 保留亚秒精度：相册里的先后顺序靠它还原
+        final creationTimestamp = creationSeconds.toDouble();
         final creationDate = DateTime.fromMillisecondsSinceEpoch(
           (creationSeconds * 1000).toInt(),
         );
@@ -228,6 +230,7 @@ class BackupManager {
               tempDir: tempDir,
               localIdentifier: localId,
               creationDate: creationDate,
+              creationTimestamp: creationTimestamp,
               pendingRecords: pendingRecords,
             );
           } else if (mediaType == 'image') {
@@ -236,6 +239,7 @@ class BackupManager {
               tempDir: tempDir,
               localIdentifier: localId,
               creationDate: creationDate,
+              creationTimestamp: creationTimestamp,
               isLivePhoto: isLivePhoto,
               pendingRecords: pendingRecords,
             );
@@ -335,6 +339,7 @@ class BackupManager {
     required Directory tempDir,
     required String localIdentifier,
     required DateTime creationDate,
+    required double creationTimestamp,
     required bool isLivePhoto,
     required List<BackupRecord> pendingRecords,
   }) async {
@@ -422,6 +427,7 @@ class BackupManager {
         localIdentifier: localIdentifier,
         relativePath: serverPath,
         creationDate: creationDate,
+        creationTimestamp: creationTimestamp,
         mediaType: isLivePhoto && videoServerPath != null
             ? 'live_photo'
             : 'image',
@@ -438,6 +444,7 @@ class BackupManager {
     required Directory tempDir,
     required String localIdentifier,
     required DateTime creationDate,
+    required double creationTimestamp,
     required List<BackupRecord> pendingRecords,
   }) async {
     final fileName =
@@ -477,6 +484,7 @@ class BackupManager {
         localIdentifier: localIdentifier,
         relativePath: serverPath,
         creationDate: creationDate,
+        creationTimestamp: creationTimestamp,
         mediaType: 'video',
       ),
     );
