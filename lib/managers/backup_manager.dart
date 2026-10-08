@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 import '../helpers/file_helper.dart';
 import '../helpers/photo_library_helper.dart';
 import '../models/backup_record.dart';
+import '../services/manifest_index.dart';
 import '../services/server_client.dart';
 import '../services/server_config.dart';
 import 'record_store.dart';
@@ -154,24 +155,67 @@ class BackupManager {
       }
 
       // 4. 过滤已备份的资产
-      final backedRecords = await _recordStore.loadAllRecords();
-      final backedIds = backedRecords.map((r) => r.localIdentifier).toSet();
-      var unbacked = assets
-          .where((a) => !backedIds.contains(a['localIdentifier'] as String))
-          .toList();
+            //
+            // 判定依据是**设备无关的资产指纹**（拍摄时间 + 类型 + 像素尺寸），
+            // 而不是 localIdentifier —— 后者换设备/重装后全变，会导致：
+            //   · 沙盒一丢 → 认不出已备份 → 全量重传（实测浪费 148MB）
+            //   · 换设备 → 认不出已恢复 → 恢复时产生大量重复
+            //
+            // 两级判断：
+            //   ① 先用本地记录的 localIdentifier 快速过滤（同一设备上最准、零开销）
+            //   ② 仍有疑似未备份的，才去问电脑上的清单（manifest.jsonl）核对
+            //      —— 沙盒丢失后本地 ID 全失效，这一步才是真正的兜底
+            // 清单拿不到时（连不上 / 旧版接收端没有该接口）自动退化为只看本地记录。
+            final backedRecords = await _recordStore.loadAllRecords();
+            final backedIds = backedRecords.map((r) => r.localIdentifier).toSet();
+            var unbacked = assets
+                .where((a) => !backedIds.contains(a['localIdentifier'] as String))
+                .toList();
 
-      final remaining = unbacked.length;
-      if (remaining == 0) {
-        yield BackupProgress(
-          completed: 0,
-          total: assets.length,
-          percentage: 100,
-          currentFile: '所有照片均已备份，无需重复传输',
-          logMessage:
-              '相册共 ${assets.length} 个资产，全部已备份（本地记录 ${backedRecords.length} 条）',
-        );
-        return;
-      }
+            // 只有确实还有东西要传时才拉清单，避免每次点备份都白拉一次
+            ManifestIndex? manifest;
+            if (unbacked.isNotEmpty) {
+              manifest = await ManifestIndex.fetch(client);
+            }
+            if (manifest != null && !manifest.isEmpty) {
+              final localPrints = <String>{
+                for (final r in backedRecords) AssetFingerprint.fromRecord(r).key,
+                // 旧记录没有宽高字段时会生成 '?x?' 的退化键，与本机带宽高的指纹
+                // 不相等；再补一份宽松键，保证「宁可多传一次也不漏传」
+                for (final r in backedRecords)
+                  AssetFingerprint.fromRecord(r).looseKey,
+              };
+              final manifestPrints = <String>{
+                ...manifest.fingerprintKeys,
+                ...manifest.looseFingerprintKeys,
+              };
+
+              unbacked = unbacked.where((a) {
+                final isLive = a['isLivePhoto'] as bool? ?? false;
+                final fp = AssetFingerprint.fromAsset(a, isLivePhoto: isLive);
+                if (localPrints.contains(fp.key) ||
+                    manifestPrints.contains(fp.key)) {
+                  return false;
+                }
+                // 指纹退化（清单里是 Backfill 数据、没有宽高）时用宽松键兜底
+                return !(localPrints.contains(fp.looseKey) ||
+                    manifestPrints.contains(fp.looseKey));
+              }).toList();
+            }
+
+          final remaining = unbacked.length;
+          if (remaining == 0) {
+            yield BackupProgress(
+              completed: 0,
+              total: assets.length,
+              percentage: 100,
+              currentFile: '所有照片均已备份，无需重复传输',
+              logMessage: '相册共 ${assets.length} 个资产，全部已备份'
+                  '（本地记录 ${backedRecords.length} 条'
+                  '${manifest != null && !manifest.isEmpty ? '、电脑清单 ${manifest.assetCount} 个资产' : '、电脑清单不可用'}）',
+            );
+            return;
+          }
 
       // 单次数量上限（0 = 不限制）：只影响这一次，没传完的下次继续
       if (limit > 0 && unbacked.length > limit) {
@@ -187,7 +231,8 @@ class BackupManager {
             ? '本次上限 $total 个（共 $remaining 个待备份），开始传输...'
             : '待备份 $total 个，开始传输...',
         logMessage: '相册共 ${assets.length} 个资产｜已备份 ${assets.length - remaining} 个｜'
-            '本次待传 $total 个${remaining > total ? '（另有 ${remaining - total} 个留待下次）' : ''}',
+            '本次待传 $total 个${remaining > total ? '（另有 ${remaining - total} 个留待下次）' : ''}'
+            '${manifest != null && !manifest.isEmpty ? '｜电脑清单已核对 ${manifest.assetCount} 个资产' : '｜电脑清单不可用，仅凭本地记录判断'}',
       );
 
       // 5. 逐个导出并上传
@@ -218,6 +263,9 @@ class BackupManager {
         );
         final mediaType = asset['mediaType'] as String;
         final isLivePhoto = asset['isLivePhoto'] as bool? ?? false;
+        // 像素宽高：设备无关指纹的要素之一，随元数据一起发给电脑端记账
+        final pixelWidth = (asset['pixelWidth'] as num?)?.toInt();
+        final pixelHeight = (asset['pixelHeight'] as num?)?.toInt();
 
         var bytesThisAsset = 0;
         String? failure;
@@ -231,6 +279,8 @@ class BackupManager {
               localIdentifier: localId,
               creationDate: creationDate,
               creationTimestamp: creationTimestamp,
+              pixelWidth: pixelWidth,
+              pixelHeight: pixelHeight,
               pendingRecords: pendingRecords,
             );
           } else if (mediaType == 'image') {
@@ -241,6 +291,8 @@ class BackupManager {
               creationDate: creationDate,
               creationTimestamp: creationTimestamp,
               isLivePhoto: isLivePhoto,
+              pixelWidth: pixelWidth,
+              pixelHeight: pixelHeight,
               pendingRecords: pendingRecords,
             );
           } else {
@@ -341,6 +393,8 @@ class BackupManager {
     required DateTime creationDate,
     required double creationTimestamp,
     required bool isLivePhoto,
+    required int? pixelWidth,
+    required int? pixelHeight,
     required List<BackupRecord> pendingRecords,
   }) async {
     // 扩展名只是占位，原生会按资源真实类型写入并返回实际路径
@@ -376,6 +430,8 @@ class BackupManager {
         role: 'main',
         mediaType: isLivePhoto ? 'live_photo' : 'image',
         creationTimestamp: creationTimestamp,
+        pixelWidth: pixelWidth,
+        pixelHeight: pixelHeight,
       );
       if (!result.success) {
         throw Exception(result.message ?? '上传失败');
@@ -417,6 +473,10 @@ class BackupManager {
               role: 'pairedVideo',
               mediaType: 'video',
               creationTimestamp: creationTimestamp,
+              // 配对视频沿用照片的宽高：它与照片是同一个资产、同一尺寸，
+              // 指纹必须与主文件一致，否则会被当成两个不同资产
+              pixelWidth: pixelWidth,
+              pixelHeight: pixelHeight,
             );
             if (videoResult.success) {
               videoBytes = await videoFile.length();
@@ -442,6 +502,8 @@ class BackupManager {
             ? 'live_photo'
             : 'image',
         livePhotoVideoRelativePath: videoServerPath,
+        pixelWidth: pixelWidth,
+        pixelHeight: pixelHeight,
       ),
     );
 
@@ -455,6 +517,8 @@ class BackupManager {
     required String localIdentifier,
     required DateTime creationDate,
     required double creationTimestamp,
+    required int? pixelWidth,
+    required int? pixelHeight,
     required List<BackupRecord> pendingRecords,
   }) async {
     final fileName =
@@ -486,6 +550,8 @@ class BackupManager {
         role: 'main',
         mediaType: 'video',
         creationTimestamp: creationTimestamp,
+        pixelWidth: pixelWidth,
+        pixelHeight: pixelHeight,
       );
       if (!result.success) {
         throw Exception(result.message ?? '上传失败');
@@ -501,6 +567,8 @@ class BackupManager {
         creationDate: creationDate,
         creationTimestamp: creationTimestamp,
         mediaType: 'video',
+        pixelWidth: pixelWidth,
+        pixelHeight: pixelHeight,
       ),
     );
 

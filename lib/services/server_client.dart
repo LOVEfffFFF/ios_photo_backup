@@ -93,6 +93,8 @@ class ServerClient {
     double? creationTimestamp,
     String? role,
     String? pairKey,
+    int? pixelWidth,
+    int? pixelHeight,
   }) async {
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 15);
@@ -112,6 +114,12 @@ class ServerClient {
         // 固定小数点表示，避免 Dart 在极端数值下输出科学计数法
         request.headers
             .set('X-Creation-Timestamp', creationTimestamp.toStringAsFixed(6));
+      }
+      if (pixelWidth != null && pixelWidth > 0) {
+        request.headers.set('X-Pixel-Width', '$pixelWidth');
+      }
+      if (pixelHeight != null && pixelHeight > 0) {
+        request.headers.set('X-Pixel-Height', '$pixelHeight');
       }
       request.headers.contentType = ContentType.binary;
       final length = await file.length();

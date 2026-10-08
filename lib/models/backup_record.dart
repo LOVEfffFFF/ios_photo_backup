@@ -19,6 +19,14 @@ class BackupRecord {
   /// 媒体类型: "image" / "video" / "live_photo"
   final String mediaType;
 
+  /// 像素宽高（拍摄时的尺寸）
+  ///
+  /// 与设备无关的识别依据之一：换设备后 localIdentifier 全变，但「拍摄时间 +
+  /// 尺寸」不变，可据此判断「本机这张是不是同一个资产」。旧记录没有这两个
+  /// 字段时为 null，指纹会自动退化为「时间 + 类型」。
+  final int? pixelWidth;
+  final int? pixelHeight;
+
   /// 如果是 Live Photo，记录配对视频的相对路径
   final String? livePhotoVideoRelativePath;
 
@@ -28,6 +36,8 @@ class BackupRecord {
     required this.creationDate,
     required this.mediaType,
     this.livePhotoVideoRelativePath,
+    this.pixelWidth,
+    this.pixelHeight,
     double? creationTimestamp,
   }) : creationTimestamp =
             creationTimestamp ?? creationDate.millisecondsSinceEpoch / 1000.0;
@@ -44,6 +54,8 @@ class BackupRecord {
           json['livePhotoVideoRelativePath'] as String?,
       creationTimestamp: (json['creationTimestamp'] as num?)?.toDouble() ??
           creationDate.millisecondsSinceEpoch / 1000.0,
+      pixelWidth: (json['pixelWidth'] as num?)?.toInt(),
+      pixelHeight: (json['pixelHeight'] as num?)?.toInt(),
     );
   }
 
@@ -56,6 +68,8 @@ class BackupRecord {
       'creationTimestamp': creationTimestamp,
       'mediaType': mediaType,
       'livePhotoVideoRelativePath': livePhotoVideoRelativePath,
+      'pixelWidth': pixelWidth,
+      'pixelHeight': pixelHeight,
     };
   }
 }

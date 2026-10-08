@@ -7,6 +7,7 @@ import 'package:path/path.dart' as p;
 import '../helpers/file_helper.dart';
 import '../helpers/photo_library_helper.dart';
 import '../models/backup_record.dart';
+import '../services/manifest_index.dart';
 import '../services/server_client.dart';
 import '../services/server_config.dart';
 import 'record_store.dart';
@@ -53,14 +54,15 @@ class _RestoreOutcome {
 
 /// 把电脑上的备份拉回手机相册
 ///
-/// **判断「要不要恢复」依据的是相册当前的实际状态，而不是历史记录**：
+/// **判断「要不要恢复」依据的是相册当前的实际状态 + 资产指纹**，而不是设备 ID：
 ///
 /// | 情况 | 处理 |
 /// | --- | --- |
-/// | 原照片还在相册里 | 跳过 —— 根本不需要恢复 |
+/// | 原照片还在相册里（ID 对得上） | 跳过 |
+/// | 原照片还在，但 ID 对不上（换设备/重装） | 按**指纹**（拍摄时间+类型+尺寸）匹配，命中即跳过 |
 /// | 原照片没了，但之前导入的那张还在 | 跳过 —— 避免重复导入 |
 /// | 原照片没了，之前导入的那张也被删了 | **重新恢复** ✓ |
-/// | 从未导入过，原照片也没了 | 恢复 |
+/// | 本地记录为空（沙盒丢失） | 从**电脑上的清单**重建记录后继续 |
 ///
 /// 第 2、3 条依赖 `restore_state.json` 里记录的「导入后新资产的
 /// localIdentifier」—— 因为导入产出的是**新资产**，用原照片的 ID
@@ -139,13 +141,28 @@ class RestoreManager {
       );
 
       // 2. 备份记录
-      final records = await _recordStore.loadAllRecords();
+      //
+      // 优先用本地记录；本地为空（App 重装 / 沙盒被清）时，
+      // 退回到「电脑上的清单」重建 —— 侧载场景下沙盒丢失是常态，
+      // 不能因此就完全无法恢复。
+      var records = await _recordStore.loadAllRecords();
+      var rebuiltFromManifest = false;
+      if (records.isEmpty) {
+        final manifest = await ManifestIndex.fetch(client);
+        if (manifest != null && !manifest.isEmpty) {
+          records = manifest.toRecords();
+          rebuiltFromManifest = true;
+        }
+      }
       if (records.isEmpty) {
         yield RestoreProgress(
           completed: 0,
           total: 0,
           percentage: 0,
-          error: '手机上没有备份记录，无法恢复（记录文件丢失时可用电脑上的文件手动导入）',
+          error: rebuiltFromManifest
+              ? '电脑清单里没有可恢复的条目'
+              : '手机上没有备份记录，且无法从电脑获取清单（请确认接收端已启动、'
+                  'App 与电脑在同一局域网，或先用新版 App 备份一次以生成清单）',
           fatal: true,
         );
         return;
@@ -159,18 +176,26 @@ class RestoreManager {
         total: records.length,
         percentage: 0,
         currentFile: '正在核对相册状态...',
-        logMessage: '备份记录 ${records.length} 条｜历史恢复记录 ${state.length} 条｜正在核对相册...',
+        logMessage: '备份记录 ${records.length} 条'
+            '${rebuiltFromManifest ? '（来自电脑清单）' : ''}｜'
+            '历史恢复记录 ${state.length} 条｜正在核对相册...',
       );
 
       final originalStillThere = await PhotoLibraryHelper.filterExistingAssets(
         records.map((r) => r.localIdentifier).toList(),
       );
+      // 批量一次性问原生，避免在循环里逐条调用造成 N 次跨语言往返
       final restoredStillThere = await PhotoLibraryHelper.filterExistingAssets(
         state.values.where((v) => v.isNotEmpty).toList(),
       );
 
+      // 指纹兜底：localIdentifier 换设备后必然全部失效，
+      // 因此再按「拍摄时间 + 类型 + 尺寸」判断本机是否已经有这张照片。
+      final localPrints = await _loadLibraryFingerprints();
+
       final pending = <BackupRecord>[];
       var skippedOriginal = 0;
+      var skippedByPrint = 0;
       var skippedRestored = 0;
 
       for (final record in records) {
@@ -178,8 +203,16 @@ class RestoreManager {
           skippedOriginal++;
           continue;
         }
+        // 原图还在，但 ID 对不上（换设备 / 重装系统）：用指纹确认
+        final fp = AssetFingerprint.fromRecord(record);
+        if (localPrints.contains(fp.key) ||
+            (fp.pixelWidth == null && localPrints.contains(fp.looseKey))) {
+          skippedByPrint++;
+          continue;
+        }
         final restoredAssetId = state[record.localIdentifier];
         if (restoredAssetId != null &&
+            restoredAssetId.isNotEmpty &&
             restoredStillThere.contains(restoredAssetId)) {
           skippedRestored++;
           continue;
@@ -193,7 +226,9 @@ class RestoreManager {
         percentage: 0,
         currentFile: '待恢复 ${pending.length} 条',
         logMessage: '核对完成：原照片仍在相册 $skippedOriginal 条（跳过）｜'
-            '已导入且仍在相册 $skippedRestored 条（跳过）｜待恢复 ${pending.length} 条',
+            '指纹匹配到本机已有 $skippedByPrint 条（跳过）｜'
+            '已导入且仍在相册 $skippedRestored 条（跳过）｜待恢复 ${pending.length} 条'
+            '${rebuiltFromManifest ? '｜记录来自电脑清单' : ''}',
       );
 
       if (pending.isEmpty) {
@@ -396,6 +431,26 @@ class RestoreManager {
         await _safeDelete(File(videoPath));
       }
     }
+  }
+
+  /// 采集本机相册的全部资产指纹，用于判断「这张照片是不是已经在手机上了」
+  ///
+  /// 把 `fetchAllAssets` 的每个资产转成指纹键；精确键与宽松键都放进集合，
+  /// 这样宽高缺失的旧记录也能匹配上。
+  Future<Set<String>> _loadLibraryFingerprints() async {
+    final result = <String>{};
+    try {
+      final assets = await PhotoLibraryHelper.fetchAllAssets();
+      for (final asset in assets) {
+        final isLive = asset['isLivePhoto'] as bool? ?? false;
+        final fp = AssetFingerprint.fromAsset(asset, isLivePhoto: isLive);
+        result.add(fp.key);
+        result.add(fp.looseKey);
+      }
+    } catch (e) {
+      print('[RestoreManager] 采集本机指纹失败: $e');
+    }
+    return result;
   }
 
   // ------------------------------------------------------------ 恢复状态
