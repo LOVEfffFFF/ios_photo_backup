@@ -277,7 +277,7 @@ class _MainPageState extends State<MainPage> {
 
     final limit = _parseLimit();
     _addLog('开始增量备份 → ${_config.isConfigured ? _config.baseUrl : '未配置服务器'}'
-        '${limit > 0 ? '（本次最多 $limit 个）' : ''}');
+        '${limit > 0 ? '（只备份最新 $limit 个）' : '（不限制数量）'}');
 
     _backupSubscription = _backupManager.startBackup(limit: limit).listen(
       (progress) {
@@ -571,8 +571,8 @@ class _MainPageState extends State<MainPage> {
               enabled: !_isOperating,
               keyboardType: TextInputType.number,
               decoration: const InputDecoration(
-                labelText: '本次最多备份数量（留空 = 全部）',
-                hintText: '例如填 10，用于小批量测试',
+                labelText: '只备份最新 N 个（留空 = 全部）',
+                              hintText: '例如填 10：只传最新 10 张，已传过不再传；想备份更老的就调大数字',
                 border: OutlineInputBorder(),
                 isDense: true,
               ),

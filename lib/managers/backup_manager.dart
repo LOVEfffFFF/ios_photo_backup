@@ -156,21 +156,35 @@ class BackupManager {
 
       // 4. 过滤已备份的资产
             //
-            // 判定依据是**设备无关的资产指纹**（拍摄时间 + 类型 + 像素尺寸），
+            // ## limit 的语义：**关注窗口**，不是「分批推进」
+            //
+            // limit > 0 时只关心「拍摄时间最新的 N 个」，窗口内的传完后，
+            // 再点备份会显示"窗口内全部已备份"而**不会**继续往更老的传。
+            // 想继续备份更老的照片，调大 limit 或填 0（不限制）即可。
+            //
+            // ## 已备份的判定依据：**设备无关的资产指纹**（拍摄时间 + 类型 + 像素尺寸）
+            //
             // 而不是 localIdentifier —— 后者换设备/重装后全变，会导致：
-            //   · 沙盒一丢 → 认不出已备份 → 全量重传（实测浪费 148MB）
+            //   · 沙盒一丢→ 认不出已备份 → 全量重传（实测浪费 148MB）
             //   · 换设备 → 认不出已恢复 → 恢复时产生大量重复
             //
             // 两级判断：
             //   ① 先用本地记录的 localIdentifier 快速过滤（同一设备上最准、零开销）
             //   ② 仍有疑似未备份的，才去问电脑上的清单（manifest.jsonl）核对
             //      —— 沙盒丢失后本地 ID 全失效，这一步才是真正的兜底
-            // 清单拿不到时（连不上 / 旧版接收端没有该接口）自动退化为只看本地记录。
+            // 清单拿不到时（连不上 /旧版接收端没有该接口）自动退化为只看本地记录。
+
+            // 先划定关注窗口：最新 N 个（assets 已按拍摄时间从新到旧排序）
+            final window = (limit > 0 && assets.length > limit)
+                ? assets.take(limit).toList(growable: false)
+                : assets;
+            final outsideCount = assets.length - window.length;
+
             final backedRecords = await _recordStore.loadAllRecords();
             final backedIds = backedRecords.map((r) => r.localIdentifier).toSet();
-            var unbacked = assets
-                .where((a) => !backedIds.contains(a['localIdentifier'] as String))
-                .toList();
+            var unbacked =
+                window.where((a) => !backedIds.contains(a['localIdentifier'] as String))
+                    .toList();
 
             // 只有确实还有东西要传时才拉清单，避免每次点备份都白拉一次
             ManifestIndex? manifest;
@@ -203,37 +217,43 @@ class BackupManager {
               }).toList();
             }
 
-          final remaining = unbacked.length;
-          if (remaining == 0) {
+            final total = unbacked.length;
+            final windowBacked = window.length - total;
+
+            if (total == 0) {
+              yield BackupProgress(
+                completed: 0,
+                total: window.length,
+                percentage: 100,
+                currentFile: limit > 0
+                    ? '最新 $limit 个已全部备份'
+                    : '所有照片均已备份，无需重复传输',
+                logMessage: limit > 0
+                    ? '关注窗口：最新 $limit 个资产，其中已备份 $windowBacked 个，无需再传'
+                        '${outsideCount > 0 ? '｜窗口外还有 $outsideCount 个（调大上限或留空可继续备份）' : ''}'
+                        '${manifest != null && !manifest.isEmpty ? '｜电脑清单已核对 ${manifest.assetCount} 个资产' : ''}'
+                    : '相册共 ${assets.length} 个资产，全部已备份'
+                        '（本地记录 ${backedRecords.length} 条'
+                        '${manifest != null && !manifest.isEmpty ? '、电脑清单 ${manifest.assetCount} 个资产' : '、电脑清单不可用'}）',
+              );
+              return;
+            }
+
             yield BackupProgress(
               completed: 0,
-              total: assets.length,
-              percentage: 100,
-              currentFile: '所有照片均已备份，无需重复传输',
-              logMessage: '相册共 ${assets.length} 个资产，全部已备份'
-                  '（本地记录 ${backedRecords.length} 条'
-                  '${manifest != null && !manifest.isEmpty ? '、电脑清单 ${manifest.assetCount} 个资产' : '、电脑清单不可用'}）',
+              total: total,
+              percentage: 0,
+              currentFile: limit > 0
+                  ? '最新 $limit 个里还有 $total 个未备份，开始传输...'
+                  : '待备份 $total 个，开始传输...',
+              logMessage: limit > 0
+                  ? '关注窗口：最新 $limit 个资产（相册共 ${assets.length} 个）｜'
+                      '窗口内已备份 $windowBacked 个｜本次待传 $total 个'
+                      '${outsideCount > 0 ? '｜窗口外还有 $outsideCount 个，调大上限或留空可继续备份' : ''}'
+                      '${manifest != null && !manifest.isEmpty ? '｜电脑清单已核对 ${manifest.assetCount} 个资产' : '｜电脑清单不可用，仅凭本地记录判断'}'
+                  : '相册共 ${assets.length} 个资产｜已备份 $windowBacked 个｜本次待传 $total 个'
+                      '${manifest != null && !manifest.isEmpty ? '｜电脑清单已核对 ${manifest.assetCount} 个资产' : '｜电脑清单不可用，仅凭本地记录判断'}',
             );
-            return;
-          }
-
-      // 单次数量上限（0 = 不限制）：只影响这一次，没传完的下次继续
-      if (limit > 0 && unbacked.length > limit) {
-        unbacked = unbacked.take(limit).toList();
-      }
-
-      final total = unbacked.length;
-      yield BackupProgress(
-        completed: 0,
-        total: total,
-        percentage: 0,
-        currentFile: limit > 0 && remaining > total
-            ? '本次上限 $total 个（共 $remaining 个待备份），开始传输...'
-            : '待备份 $total 个，开始传输...',
-        logMessage: '相册共 ${assets.length} 个资产｜已备份 ${assets.length - remaining} 个｜'
-            '本次待传 $total 个${remaining > total ? '（另有 ${remaining - total} 个留待下次）' : ''}'
-            '${manifest != null && !manifest.isEmpty ? '｜电脑清单已核对 ${manifest.assetCount} 个资产' : '｜电脑清单不可用，仅凭本地记录判断'}',
-      );
 
       // 5. 逐个导出并上传
       final tempDir = await FileHelper.getUploadTempDirectory();
@@ -367,8 +387,8 @@ class BackupManager {
         currentFile: summary,
         uploadedBytes: uploadedBytes,
         logMessage: '📊 $summary｜累计传输 ${_fmtBytes(uploadedBytes)}'
-            '${limit > 0 ? '｜本次上限 $limit 个' : ''}'
-            '${remaining > total ? '｜另有 ${remaining - total} 个留待下次' : ''}',
+            '${limit > 0 ? '｜关注窗口：最新 $limit 个，已全部备份（不会往更老的传）' : ''}'
+            '${outsideCount > 0 ? '｜窗口外还有 $outsideCount 个未备份，调大上限或留空可继续' : ''}',
       );
     } catch (e) {
       yield BackupProgress(
