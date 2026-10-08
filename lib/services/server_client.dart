@@ -28,6 +28,15 @@ class UploadResult {
 ///   GET  /ping                              连通性探测
 ///   POST /upload    X-File-Path: <相对路径>   上传文件原始字节
 ///   GET  /download?path=<相对路径>            下载文件（恢复用）
+///   GET  /manifest[?since=<ISO时间>]          读取元数据清单（NDJSON）
+///
+/// /upload 还会带上一组元数据头，接收端把它们写进 manifest.jsonl ——
+/// 那份清单是手机沙盒丢失后，唯一还能说清「哪个文件是什么照片」的地方：
+///   X-Asset-Id             原设备的 localIdentifier
+///   X-Pair-Key             同一资产（含 Live Photo 的照片与配对视频）共用
+///   X-Role                 main | pairedVideo
+///   X-Media-Type           image | video | live_photo
+///   X-Creation-Timestamp   拍摄时间，Unix 秒（亚秒精度）
 class ServerClient {
   final ServerConfig config;
 
@@ -72,9 +81,18 @@ class ServerClient {
   }
 
   /// 将本地文件上传到接收端
+  ///
+  /// 传入 [assetId] / [mediaType] / [creationTimestamp] / [role] / [pairKey]
+  /// 后，接收端会把它们记入元数据清单。缺失时只是清单里对应字段为空，
+  /// 不影响文件接收本身。
   Future<UploadResult> uploadFile({
     required File file,
     required String relativePath,
+    String? assetId,
+    String? mediaType,
+    double? creationTimestamp,
+    String? role,
+    String? pairKey,
   }) async {
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 15);
@@ -85,6 +103,15 @@ class ServerClient {
           .set('X-File-Path', Uri.encodeComponent(relativePath));
       if (config.token.isNotEmpty) {
         request.headers.set('X-Auth-Token', config.token);
+      }
+      _setHeaderIfPresent(request, 'X-Asset-Id', assetId);
+      _setHeaderIfPresent(request, 'X-Media-Type', mediaType);
+      _setHeaderIfPresent(request, 'X-Role', role);
+      _setHeaderIfPresent(request, 'X-Pair-Key', pairKey);
+      if (creationTimestamp != null) {
+        // 固定小数点表示，避免 Dart 在极端数值下输出科学计数法
+        request.headers
+            .set('X-Creation-Timestamp', creationTimestamp.toStringAsFixed(6));
       }
       request.headers.contentType = ContentType.binary;
       final length = await file.length();
@@ -173,6 +200,75 @@ class ServerClient {
         // 忽略关闭异常
       }
       client.close(force: true);
+    }
+  }
+
+  /// 读取电脑上的元数据清单（manifest.jsonl）
+  ///
+  /// 返回解析后的条目列表；连接失败 / 非 200 时返回 null。
+  ///
+  /// 清单里每条形如：
+  /// ```json
+  /// {"v":1,"serverPath":"2026/10/xxx.heic","size":2094563,"sha256":"ab...",
+  ///  "assetId":"...","pairKey":"...","role":"main","mediaType":"live_photo",
+  ///  "createdUnix":1791413632.123456,"receivedAt":"...","inferred":false}
+  /// ```
+  /// 同一个 serverPath 可能出现多行（重复上传 / backfill 后被补记），
+  /// 调用方需按 serverPath 取最后一条。
+  ///
+  /// [since] 为 ISO8601 时间，只取该时间之后收到的条目（增量同步）。
+  Future<List<Map<String, dynamic>>?> downloadManifest({String? since}) async {
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 15);
+    try {
+      var uri = Uri.parse('${config.baseUrl}/manifest');
+      if (since != null && since.isNotEmpty) {
+        uri = uri.replace(queryParameters: {'since': since});
+      }
+      final request = await client.getUrl(uri);
+      if (config.token.isNotEmpty) {
+        request.headers.set('X-Auth-Token', config.token);
+      }
+
+      final response = await request.close().timeout(downloadTimeout);
+      if (response.statusCode != 200) {
+        await response.drain();
+        return null;
+      }
+
+      final body = await response.transform(utf8.decoder).join();
+      final entries = <Map<String, dynamic>>[];
+      for (final line in const LineSplitter().convert(body)) {
+        final trimmed = line.trim();
+        if (trimmed.isEmpty) {
+          continue;
+        }
+        try {
+          final decoded = jsonDecode(trimmed);
+          if (decoded is Map<String, dynamic>) {
+            // 清单里每条必须有 serverPath；缺字段的（异常行 / 旧版返回格式）
+            // 直接丢弃，避免污染调用方的记录重建
+            if (decoded['serverPath'] is String &&
+                (decoded['serverPath'] as String).isNotEmpty) {
+              entries.add(decoded);
+            }
+          }
+        } catch (_) {
+          // 跳过损坏的行，不影响其余条目
+        }
+      }
+      return entries;
+    } catch (_) {
+      return null;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// 仅在值非空时设置请求头（HTTP 头不能为空值）
+  void _setHeaderIfPresent(HttpClientRequest request, String name, String? value) {
+    if (value != null && value.isNotEmpty) {
+      request.headers.set(name, value);
     }
   }
 }

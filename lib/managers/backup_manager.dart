@@ -371,6 +371,11 @@ class BackupManager {
       final result = await client.uploadFile(
         file: photoFile,
         relativePath: serverPath,
+        assetId: localIdentifier,
+        pairKey: localIdentifier,
+        role: 'main',
+        mediaType: isLivePhoto ? 'live_photo' : 'image',
+        creationTimestamp: creationTimestamp,
       );
       if (!result.success) {
         throw Exception(result.message ?? '上传失败');
@@ -407,6 +412,11 @@ class BackupManager {
             final videoResult = await client.uploadFile(
               file: videoFile,
               relativePath: videoServerPath,
+              assetId: localIdentifier,
+              pairKey: localIdentifier,
+              role: 'pairedVideo',
+              mediaType: 'video',
+              creationTimestamp: creationTimestamp,
             );
             if (videoResult.success) {
               videoBytes = await videoFile.length();
@@ -471,6 +481,11 @@ class BackupManager {
       final result = await client.uploadFile(
         file: videoFile,
         relativePath: serverPath,
+        assetId: localIdentifier,
+        pairKey: localIdentifier,
+        role: 'main',
+        mediaType: 'video',
+        creationTimestamp: creationTimestamp,
       );
       if (!result.success) {
         throw Exception(result.message ?? '上传失败');
