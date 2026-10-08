@@ -18,11 +18,15 @@ class ServerConfig {
   /// 访问令牌，需与接收端 -Token 一致；为空表示接收端未启用鉴权
   final String token;
 
+  /// 单次备份的数量上限；0 表示不限制（测试时设为小值很方便）
+  final int backupLimit;
+
   const ServerConfig({
     this.scheme = 'http',
     this.host = '',
     this.port = 8080,
     this.token = '',
+    this.backupLimit = 0,
   });
 
   static const ServerConfig empty = ServerConfig();
@@ -32,7 +36,11 @@ class ServerConfig {
   String get baseUrl => '$scheme://$host:$port';
 
   /// 解析用户输入的地址，非法时返回 null
-  static ServerConfig? parseAddress(String input, {String token = ''}) {
+  static ServerConfig? parseAddress(
+    String input, {
+    String token = '',
+    int backupLimit = 0,
+  }) {
     final raw = input.trim();
     if (raw.isEmpty) return null;
 
@@ -54,6 +62,7 @@ class ServerConfig {
       host: uri.host,
       port: port,
       token: token.trim(),
+      backupLimit: backupLimit < 0 ? 0 : backupLimit,
     );
   }
 
@@ -65,6 +74,7 @@ class ServerConfig {
         'host': host,
         'port': port,
         'token': token,
+        'backupLimit': backupLimit,
       };
 
   factory ServerConfig.fromJson(Map<String, dynamic> json) {
@@ -73,6 +83,7 @@ class ServerConfig {
       host: (json['host'] as String?) ?? '',
       port: (json['port'] as num?)?.toInt() ?? 8080,
       token: (json['token'] as String?) ?? '',
+      backupLimit: (json['backupLimit'] as num?)?.toInt() ?? 0,
     );
   }
 
@@ -103,12 +114,19 @@ class ServerConfig {
     await file.writeAsString(jsonEncode(toJson()), flush: true);
   }
 
-  ServerConfig copyWith({String? scheme, String? host, int? port, String? token}) {
+  ServerConfig copyWith({
+    String? scheme,
+    String? host,
+    int? port,
+    String? token,
+    int? backupLimit,
+  }) {
     return ServerConfig(
       scheme: scheme ?? this.scheme,
       host: host ?? this.host,
       port: port ?? this.port,
       token: token ?? this.token,
+      backupLimit: backupLimit ?? this.backupLimit,
     );
   }
 }

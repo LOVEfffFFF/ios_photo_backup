@@ -54,7 +54,10 @@ class BackupManager {
   bool get isRunning => _isRunning;
 
   /// 开始备份（增量）
-  Stream<BackupProgress> startBackup() async* {
+  ///
+  /// [limit] 本次最多处理的资产数量，0 表示不限制。
+  /// 主要用于测试：不想一次性把整个相册传完时设一个小值。
+  Stream<BackupProgress> startBackup({int limit = 0}) async* {
     if (_isRunning) {
       yield BackupProgress(
         completed: 0,
@@ -136,12 +139,12 @@ class BackupManager {
       // 4. 过滤已备份的资产
       final backedRecords = await _recordStore.loadAllRecords();
       final backedIds = backedRecords.map((r) => r.localIdentifier).toSet();
-      final unbacked = assets
+      var unbacked = assets
           .where((a) => !backedIds.contains(a['localIdentifier'] as String))
           .toList();
 
-      final total = unbacked.length;
-      if (total == 0) {
+      final remaining = unbacked.length;
+      if (remaining == 0) {
         yield BackupProgress(
           completed: 0,
           total: assets.length,
@@ -151,11 +154,19 @@ class BackupManager {
         return;
       }
 
+      // 单次数量上限（0 = 不限制）：只影响这一次，没传完的下次继续
+      if (limit > 0 && unbacked.length > limit) {
+        unbacked = unbacked.take(limit).toList();
+      }
+
+      final total = unbacked.length;
       yield BackupProgress(
         completed: 0,
         total: total,
         percentage: 0,
-        currentFile: '待备份 $total 个，开始传输...',
+        currentFile: limit > 0 && remaining > total
+            ? '本次上限 $total 个（共 $remaining 个待备份），开始传输...'
+            : '待备份 $total 个，开始传输...',
       );
 
       // 5. 逐个导出并上传

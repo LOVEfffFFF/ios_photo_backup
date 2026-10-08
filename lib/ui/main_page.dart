@@ -24,6 +24,7 @@ class _MainPageState extends State<MainPage> {
   // 服务器配置
   final TextEditingController _addressController = TextEditingController();
   final TextEditingController _tokenController = TextEditingController();
+  final TextEditingController _limitController = TextEditingController();
   ServerConfig _config = ServerConfig.empty;
   bool _testing = false;
   bool _connectionOk = false;
@@ -60,6 +61,7 @@ class _MainPageState extends State<MainPage> {
     _restoreSubscription?.cancel();
     _addressController.dispose();
     _tokenController.dispose();
+    _limitController.dispose();
     _logScrollController.dispose();
     super.dispose();
   }
@@ -73,7 +75,16 @@ class _MainPageState extends State<MainPage> {
         _addressController.text = config.displayAddress;
         _tokenController.text = config.token;
       }
+      if (config.backupLimit > 0) {
+        _limitController.text = config.backupLimit.toString();
+      }
     });
+  }
+
+  /// 读取「本次最多备份」输入框，非法或留空按 0（不限制）处理
+  int _parseLimit() {
+    final value = int.tryParse(_limitController.text.trim()) ?? 0;
+    return value < 0 ? 0 : value;
   }
 
   Future<void> _loadStats() async {
@@ -112,11 +123,12 @@ class _MainPageState extends State<MainPage> {
     });
   }
 
-  /// 解析输入框里的地址，非法时返回 null
+  /// 解析输入框里的地址与数量上限，非法时返回 null
   ServerConfig? _parseInput() {
     return ServerConfig.parseAddress(
       _addressController.text,
       token: _tokenController.text,
+      backupLimit: _parseLimit(),
     );
   }
 
@@ -174,9 +186,11 @@ class _MainPageState extends State<MainPage> {
       _statusText = '正在备份...';
     });
 
-    _addLog('开始增量备份 → ${_config.isConfigured ? _config.baseUrl : '未配置服务器'}');
+    final limit = _parseLimit();
+    _addLog('开始增量备份 → ${_config.isConfigured ? _config.baseUrl : '未配置服务器'}'
+        '${limit > 0 ? '（本次最多 $limit 个）' : ''}');
 
-    _backupSubscription = _backupManager.startBackup().listen(
+    _backupSubscription = _backupManager.startBackup(limit: limit).listen(
       (progress) {
         if (!mounted) return;
         setState(() {
@@ -405,6 +419,18 @@ class _MainPageState extends State<MainPage> {
               autocorrect: false,
               decoration: const InputDecoration(
                 labelText: '访问密钥（接收端未启用可留空）',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _limitController,
+              enabled: !_isOperating,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                labelText: '本次最多备份数量（留空 = 全部）',
+                hintText: '例如填 10，用于小批量测试',
                 border: OutlineInputBorder(),
                 isDense: true,
               ),
