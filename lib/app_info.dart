@@ -14,14 +14,14 @@ class AppInfo {
   static const String version = '1.1.0';
 
   /// 构建标识：编译时间（同一个版本多次编译时用它区分）
-  static const String build = '2026-10-09-04:05';
+  static const String build = '2026-10-10-03:00';
 
   /// 对应的 git 提交短 hash
   ///
   /// 注意：这是**引入/更新本文件的那次提交**，不是最终构建所在的提交
   /// （填入它时构建还没发生，无法预知自身 hash）。
   /// 精确定位以 build 时间戳 + GitHub 提交历史为准。
-  static const String commit = 'ebf42c7';
+  static const String commit = '38cc7e2';
 
   /// 界面上显示的一行摘要
   static String get display =>

@@ -13,6 +13,8 @@ dependencies:
   permission_handler: ^11.0.0
   path: ^1.8.3
   wakelock_plus: ^1.1.0
+  # 恢复时校验文件完整性（与电脑端 manifest 里的 sha256 比对）
+  crypto: ^3.0.3
 
 dev_dependencies:
   flutter_test:

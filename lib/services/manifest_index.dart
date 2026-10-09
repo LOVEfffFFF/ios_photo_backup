@@ -183,6 +183,17 @@ class ManifestIndex {
   final Map<String, ManifestEntry> _byLooseFingerprint =
       <String, ManifestEntry>{};
 
+  /// 服务器路径 → 该文件的 sha256（恢复时校验用）
+  ///
+  /// 建在**全部**条目上（含配对视频），因为恢复时主文件和配对视频都要校验。
+  final Map<String, String> _shaByPath = <String, String>{};
+
+  /// 查某个服务器路径记录的 sha256；没有记录时返回 null
+  String? sha256Of(String serverPath) {
+    final v = _shaByPath[serverPath];
+    return (v == null || v.isEmpty) ? null : v;
+  }
+
   ManifestIndex(this.entries) {
     _buildIndex();
   }
@@ -228,6 +239,9 @@ class ManifestIndex {
 
   void _buildIndex() {
     for (final e in entries) {
+      if (e.sha256.isNotEmpty) {
+        _shaByPath[e.serverPath] = e.sha256;
+      }
       // 配对视频与主文件是同一个资产，指纹相同甚至更弱（没有宽高），
       // 放进索引会顶掉主文件条目，因此只收主文件
       if (e.isPairedVideo) {

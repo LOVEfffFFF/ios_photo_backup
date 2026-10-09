@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 
 import '../helpers/file_helper.dart';
@@ -142,17 +143,18 @@ class RestoreManager {
 
       // 2. 备份记录
       //
-      // 优先用本地记录；本地为空（App 重装 / 沙盒被清）时，
+      // 优先用本地记录；本地为空（App 重装 /沙盒被清）时，
       // 退回到「电脑上的清单」重建 —— 侧载场景下沙盒丢失是常态，
       // 不能因此就完全无法恢复。
+      //
+      // 清单总是会拉：除了重建记录，还要用它里面的 sha256 校验
+      // 下载回来的文件是否损坏（GAP-S4 的恢复侧闭环）。
+      final manifest = await ManifestIndex.fetch(client);
       var records = await _recordStore.loadAllRecords();
       var rebuiltFromManifest = false;
-      if (records.isEmpty) {
-        final manifest = await ManifestIndex.fetch(client);
-        if (manifest != null && !manifest.isEmpty) {
-          records = manifest.toRecords();
-          rebuiltFromManifest = true;
-        }
+      if (records.isEmpty && manifest != null && manifest.isNotEmpty) {
+        records = manifest.toRecords();
+        rebuiltFromManifest = true;
       }
       if (records.isEmpty) {
         yield RestoreProgress(
@@ -282,6 +284,7 @@ class RestoreManager {
             tempDir: tempDir,
             record: record,
             effectiveTimestamp: effectiveTimestamp,
+            manifest: manifest,
           );
           stopwatch.stop();
 
@@ -368,6 +371,7 @@ class RestoreManager {
     required Directory tempDir,
     required BackupRecord record,
     required double effectiveTimestamp,
+    ManifestIndex? manifest,
   }) async {
     final mainName = p.basename(record.relativePath);
     final mainPath = p.join(tempDir.path, mainName);
@@ -379,6 +383,11 @@ class RestoreManager {
     if (mainBytes <= 0) {
       throw Exception('下载失败（电脑上可能已无此文件）');
     }
+
+    // 完整性校验：与电脑端清单里的 sha256 比对。
+    // 不一致说明文件在电脑上就已损坏（磁盘坏道、被覆盖等），
+    // 绝不能写进相册 —— 否则用户以为恢复成功了，实际得到一张坏图。
+    await _verifySha256(mainPath, record.relativePath, manifest, '主文件');
 
     var totalBytes = mainBytes;
     String? videoPath;
@@ -394,6 +403,10 @@ class RestoreManager {
           targetPath: candidate,
         );
         if (videoBytes > 0) {
+          // 配对视频同样校验：主文件完好但配对视频损坏时，
+          // 恢复出来的"实况照片"会无法播放，等于半坏
+          await _verifySha256(candidate, record.livePhotoVideoRelativePath!,
+              manifest, '配对视频');
           videoPath = candidate;
           totalBytes += videoBytes;
         } else {
@@ -430,6 +443,46 @@ class RestoreManager {
       if (videoPath != null) {
         await _safeDelete(File(videoPath));
       }
+    }
+  }
+
+  /// 校验下载回来的文件是否与电脑端清单记录的 sha256 一致
+  ///
+  /// [expectedPath] 是服务器上的相对路径（用它查清单）。
+  /// 清单里没有该文件的 hash 时（旧版 Backfill 数据）直接放行，不阻塞恢复。
+  ///
+  /// 不一致时抛异常 —— 调用方会把它计为失败并继续下一条，
+  /// **绝不会把损坏的文件写进相册**。
+  Future<void> _verifySha256(
+    String localFilePath,
+    String expectedPath,
+    ManifestIndex? manifest,
+    String label,
+  ) async {
+    final expected = manifest?.sha256Of(expectedPath);
+    if (expected == null) {
+      // 没有基准可比：宁可放行，也不要因为校验能力缺失而无法恢复
+      return;
+    }
+    final file = File(localFilePath);
+    if (!await file.exists()) {
+      throw Exception('$label 校验失败：文件不存在');
+    }
+    try {
+      // 流式计算，避免大视频一次性读进内存
+      final digest = await sha256.bind(file.openRead()).first;
+      final actual = digest.toString();
+      if (actual != expected) {
+        throw Exception(
+            '$label 已损坏（校验不通过）：期望 ${expected.substring(0, 12)}… '
+            '实际 ${actual.substring(0, 12)}…；已跳过，不会导入相册');
+      }
+    } on Exception catch (e) {
+      // 校验失败要明确抛出，但不能把「读文件出错」也当成损坏
+      if (e.toString().contains('已损坏')) {
+        rethrow;
+      }
+      throw Exception('$label 校验出错：$e');
     }
   }
 
