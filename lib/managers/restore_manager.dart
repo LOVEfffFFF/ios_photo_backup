@@ -152,7 +152,7 @@ class RestoreManager {
       final manifest = await ManifestIndex.fetch(client);
       var records = await _recordStore.loadAllRecords();
       var rebuiltFromManifest = false;
-      if (records.isEmpty && manifest != null && manifest.isNotEmpty) {
+      if (records.isEmpty && manifest != null && !manifest.isEmpty) {
         records = manifest.toRecords();
         rebuiltFromManifest = true;
       }

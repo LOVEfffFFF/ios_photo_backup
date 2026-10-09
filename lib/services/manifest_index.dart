@@ -125,6 +125,11 @@ class ManifestEntry {
   /// 文件字节数
   final int size;
 
+  /// 该文件的 SHA-256（清单里没有时为空串）
+  ///
+  /// 恢复时用来校验下载回来的文件是否损坏（GAP-S4）。
+  final String sha256;
+
   /// true = 这条是从文件名反推的（Backfill），不是 App 上传的权威数据
   final bool inferred;
 
@@ -138,6 +143,7 @@ class ManifestEntry {
     this.pixelWidth,
     this.pixelHeight,
     this.size = 0,
+    this.sha256 = '',
     this.inferred = false,
   });
 
@@ -153,6 +159,7 @@ class ManifestEntry {
         pixelWidth: (e['pixelWidth'] as num?)?.toInt(),
         pixelHeight: (e['pixelHeight'] as num?)?.toInt(),
         size: (e['size'] as num?)?.toInt() ?? 0,
+        sha256: (e['sha256'] as String?) ?? '',
         inferred: e['inferred'] == true,
       );
 
