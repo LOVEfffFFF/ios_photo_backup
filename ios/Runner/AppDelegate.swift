@@ -166,9 +166,9 @@ import Network
             (12, "延时摄影"), (13, "电影效果"),
         ]
         for (raw, name) in probes {
-            // 用 rawValue 构造的元素来比较，避免依赖枚举成员名在不同SDK 的差异
-            if let subtype = PHAssetMediaSubtype(rawValue: raw),
-               subtypes.contains(subtype) {
+            // PHAssetMediaSubtype(rawValue:) 返回非可选值，直接构造后判断
+            let subtype = PHAssetMediaSubtype(rawValue: raw)
+            if subtypes.contains(subtype) {
                 result.append(name)
             }
         }
