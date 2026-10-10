@@ -285,6 +285,8 @@ private func photoBackupSignalHandler(_ sig: Int32) {
             getAssetDetail(call: call, result: result)
         case "hashAssetResources":
             hashAssetResources(call: call, result: result)
+        case "deleteAssets":
+            deleteAssets(call: call, result: result)
         case "listLogs":
             DispatchQueue.global().async { result(AppDelegate.listLogs()) }
         case "readLog":
@@ -626,7 +628,66 @@ private func photoBackupSignalHandler(_ sig: Int32) {
         return out
     }
 
-    // MARK: - 往返验证：读取原图资源的哈希
+    // MARK: - 往返验证：清理验证副本
+
+/// 删除指定的资产（仅用于清理「往返验证」创建的副本）
+///
+/// ## 安全约束
+/// 这是**删除相册照片**的能力，风险最高，因此刻意做成最窄的口子：
+///   · 必须显式传 confirm=true 才执行，否则直接拒绝
+///   · 只删调用方给出的 ID 列表，不做任何"顺便清理"
+///   · 删完回传每个 ID 的成功/失败，让 UI 如实展示
+///
+/// 调用方（VerifyManager）只会传入本次验证自己创建、且记录在
+/// restoredAssetIds 里的 ID —— 绝不涉及用户原有照片。
+private func deleteAssets(call: FlutterMethodCall, result: @escaping FlutterResult) {
+    guard let args = call.arguments as? [String: Any],
+          args["confirm"] as? Bool == true else {
+        result(["error": "必须显式确认（confirm=true）才会执行删除"])
+        return
+    }
+    let ids = args["localIdentifiers"] as? [String] ?? []
+    // 空列表直接拒绝：避免"删了 0 个"被误当成成功
+    guard !ids.isEmpty else {
+        result(["error": "没有要删除的资产 ID"])
+        return
+    }
+
+    PHPhotoLibrary.requestAuthorization { status in
+        guard self.isPhotoLibraryAccessGranted(status) else {
+            DispatchQueue.main.async { result(["error": "没有相册访问权限"]) }
+            return
+        }
+        var ok = 0
+        var failed = 0
+        // 逐个删：PHPhotoLibrary 的 performChanges 不支持按 ID 批量删
+        for id in ids {
+            let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil)
+            guard let asset = fetch.firstObject else {
+                failed += 1
+                continue
+            }
+            var done = false
+            PHPhotoLibrary.shared().performChanges({
+                PHAssetChangeRequest.deleteAssets([asset] as NSArray)
+            }, completionHandler: { success, _ in
+                if success { ok += 1 } else { failed += 1 }
+                done = true
+            })
+            // performChanges 是异步的，这里等它完成再进行下一个，
+            // 避免并发 performChanges 造成不确定行为
+            let deadline = Date().addingTimeInterval(10)
+            while !done && Date() < deadline {
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+            }
+        }
+        DispatchQueue.main.async {
+            result(["deleted": ok, "failed": failed])
+        }
+    }
+}
+
+// MARK: - 往返验证：读取原图资源的哈希
 
 /// 读取某个资产**当前**各资源的字节哈希（不写入任何东西）
 ///

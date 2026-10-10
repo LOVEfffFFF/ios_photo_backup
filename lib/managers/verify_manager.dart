@@ -143,6 +143,10 @@ class VerifyManager {
   /// 本次验证创建的副本资产 ID（供调用方清理）
   final List<String> restoredAssetIds = [];
 
+  /// 最近一次验证的结果（供 UI 在收尾时兜底读取）
+  AssetVerifyResult? _lastResult;
+  AssetVerifyResult? get lastResult => _lastResult;
+
   bool get ready => _client != null;
 
   /// 读配置并拉清单
@@ -193,6 +197,7 @@ class VerifyManager {
         restoredAssetIds: List.unmodifiable(copies),
       );
       final r = await _verifyOne(record, client, manifest);
+      _lastResult = r;
       results.add(r);
       copies.addAll(r.resources
           .map((x) => x.restoredAssetId)

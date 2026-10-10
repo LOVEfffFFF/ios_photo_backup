@@ -15,6 +15,7 @@ import '../services/server_client.dart';
 import '../services/server_config.dart';
 import 'compare_page.dart';
 import 'logs_page.dart';
+import 'verify_page.dart';
 
 /// 主界面
 class MainPage extends StatefulWidget {
@@ -812,6 +813,29 @@ class _MainPageState extends State<MainPage> {
             Text(
               '逐项对比「电脑上的备份记录」与「手机里的原图」，'
               '看清备份到底存了什么、丢了什么',
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+            ),
+            const Divider(height: 24),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: _isOperating
+                    ? null
+                    : () => Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => const VerifyPage(),
+                          ),
+                        ),
+                icon: const Icon(Icons.fact_check_outlined, size: 18),
+                label: const Text('往返验证'),
+                style: TextButton.styleFrom(
+                  padding: EdgeInsets.zero,
+                ),
+              ),
+            ),
+            Text(
+              '自己选一张，把备份恢复到相册里，再和原图逐项比对'
+              '（会在相册留下副本，验完可清理）',
               style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
             ),
             const Divider(height: 24),

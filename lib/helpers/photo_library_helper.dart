@@ -277,7 +277,52 @@ class PhotoLibraryHelper {
     return null;
   }
 
-  /// 获取照片资源信息（通过原生通道）
+  /// 删除相册中的资产（**仅用于清理往返验证创建的副本**）
+///
+/// ## 这是本App 最危险的能力
+/// 它能删除用户真实的照片，因此口子刻意做窄：
+///   · 底层强制要求 confirm=true，否则直接拒绝
+///   · 只接受调用方给出的 ID 列表，不做任何"顺便清理"
+///   · 返回每个 ID 的成功/失败数，UI 必须如实展示
+///
+/// 正常使用：清掉本次验证创建的副本，保持相册干净。
+/// 绝不应用于删除用户原有照片。
+static Future<({int deleted, int failed, String? error})> deleteAssets(
+  List<String> localIdentifiers,
+) async {
+  if (localIdentifiers.isEmpty) {
+    return (deleted: 0, failed: 0, error: '没有要删除的资产 ID');
+  }
+  try {
+    final result = await _channel.invokeMethod('deleteAssets', {
+      'localIdentifiers': localIdentifiers,
+      // 硬编码 true —— 调用方无法通过参数关掉这个保护
+      'confirm': true,
+    });
+    if (result is Map) {
+      final err = result['error'] as String?;
+      if (err != null) {
+        return (
+          deleted: (result['deleted'] as num?)?.toInt() ?? 0,
+          failed: (result['failed'] as num?)?.toInt() ?? 0,
+          error: err
+        );
+      }
+      return (
+        deleted: (result['deleted'] as num?)?.toInt() ?? 0,
+        failed: (result['failed'] as num?)?.toInt() ?? 0,
+        error: null
+      );
+    }
+    return (deleted: 0, failed: localIdentifiers.length, error: '原生返回格式异常');
+  } on PlatformException catch (e) {
+    return (deleted: 0, failed: localIdentifiers.length, error: e.message);
+  } catch (e) {
+    return (deleted: 0, failed: localIdentifiers.length, error: '$e');
+  }
+}
+
+/// 获取照片资源信息（通过原生通道）
   static Future<List<Map<String, dynamic>>> fetchAllAssets() async {
     try {
       final result = await _channel.invokeMethod('fetchAllAssets');
