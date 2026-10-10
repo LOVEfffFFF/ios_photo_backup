@@ -53,8 +53,89 @@ import Network
             requestLocalNetworkPermission(result: result)
         case "checkAssetsExist":
             checkAssetsExist(call: call, result: result)
+        case "getAssetDetail":
+            getAssetDetail(call: call, result: result)
         default:
             result(FlutterMethodNotImplemented)
+        }
+    }
+
+    // MARK: - 获取单个资产的完整信息（用于「备份 vs 原图」对比）
+
+    /// 返回 PHAsset 的全部可读元数据 + 资源清单（用于诊断一份照片到底由哪些文件组成）
+    private func getAssetDetail(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let args = call.arguments as? [String: Any],
+              let localIdentifier = args["localIdentifier"] as? String else {
+            result(nil)
+            return
+        }
+
+        PHPhotoLibrary.requestAuthorization { status in
+            guard self.isPhotoLibraryAccessGranted(status) else {
+                DispatchQueue.main.async { result(nil) }
+                return
+            }
+            let fetchResult = PHAsset.fetchAssets(
+                withLocalIdentifiers: [localIdentifier], options: nil)
+            guard let asset = fetchResult.firstObject else {
+                DispatchQueue.main.async { result(nil) }
+                return
+            }
+
+            // 资源清单：一张照片可能由多份文件组成（ProRAW 的 DNG+JPEG、
+            // 人像模式的深度图、HDR 的增益图、Live Photo 的配对视频…）
+            var resourceList: [[String: Any]] = []
+            for r in PHAssetResource.assetResources(for: asset) {
+                resourceList.append([
+                    "type": r.type.rawValue,
+                    "uti": r.uniformTypeIdentifier,
+                    "fileSize": r.fileSize,
+                    "originalFilename": r.originalFilename,
+                ])
+            }
+
+            let location = asset.location
+            let detail: [String: Any] = [
+                "localIdentifier": asset.localIdentifier,
+                "creationDate": asset.creationDate?.timeIntervalSince1970 ?? 0,
+                "modificationDate": asset.modificationDate?.timeIntervalSince1970 ?? 0,
+                "pixelWidth": asset.pixelWidth,
+                "pixelHeight": asset.pixelHeight,
+                "mediaType": self.mediaTypeString(asset.mediaType),
+                "duration": asset.duration,
+                "isFavorite": asset.isFavorite,
+                "isHidden": asset.isHidden,
+                "originalFilename": asset.originalFilename,
+                "subtypes": Self.subtypeNames(asset),
+                "hasLocation": location != nil,
+                "latitude": location?.coordinate.latitude ?? 0,
+                "longitude": location?.coordinate.longitude ?? 0,
+                "formatDescriptions": asset.formatDescriptions as [String],
+                "resourceCount": resourceList.count,
+                "resources": resourceList,
+            ]
+            DispatchQueue.main.async { result(detail) }
+        }
+    }
+
+    /// mediaSubtypes 转成可读名称（判断是否 Live Photo / HDR / 人像 / RAW …）
+    private static func subtypeNames(_ asset: PHAsset) -> [String] {
+        let table: [(PHAssetMediaSubtype, String)] = [
+            (.photoLive, "实况照片"),
+            (.photoPanorama, "全景"),
+            (.photoHDR, "HDR"),
+            (.photoHDRGainMap, "HDR 增益图"),
+            (.photoDepthEffect, "人像深度效果"),
+            (.photoContentAware, "主体识别"),
+            (.photoRAW, "RAW 原片"),
+            (.videoStream, "视频流"),
+            (.videoLive, "Live Photo 视频"),
+            (.videoHighFps, "高帧率"),
+            (.videoTimelapse, "延时摄影"),
+            (.videoCinematic, "电影效果"),
+        ]
+        return table.compactMap { subtype, name in
+            asset.mediaSubtypes.contains(subtype) ? name : nil
         }
     }
 

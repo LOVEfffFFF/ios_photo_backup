@@ -73,6 +73,144 @@ class PhotoLibraryHelper {
     return <String>{};
   }
 
+  /// 单个资产的完整信息（对比「备份 vs 原图」用）
+class AssetDetail {
+  final String localIdentifier;
+  final double creationDate;
+  final double modificationDate;
+  final int pixelWidth;
+  final int pixelHeight;
+  final String mediaType;
+  final double duration;
+  final bool isFavorite;
+  final bool isHidden;
+  final String originalFilename;
+  final List<String> subtypes;
+  final bool hasLocation;
+  final List<AssetResourceInfo> resources;
+
+  const AssetDetail({
+    required this.localIdentifier,
+    required this.creationDate,
+    required this.modificationDate,
+    required this.pixelWidth,
+    required this.pixelHeight,
+    required this.mediaType,
+    required this.duration,
+    required this.isFavorite,
+    required this.isHidden,
+    required this.originalFilename,
+    required this.subtypes,
+    required this.hasLocation,
+    required this.resources,
+  });
+
+  /// 一张照片可能由多份文件组成（ProRAW 的 DNG+JPEG、人像深度图、HDR 增益图…）
+  int get resourceCount => resources.length;
+
+  String get sizeLabel => '${pixelWidth}×$pixelHeight';
+
+  String get typeLabel => subtypes.isEmpty ? mediaType : subtypes.join('、');
+
+  factory AssetDetail.fromMap(Map<String, dynamic> m) {
+    final res = <AssetResourceInfo>[];
+    final list = m['resources'] as List<dynamic>? ?? const [];
+    for (final item in list) {
+      if (item is Map) {
+        res.add(AssetResourceInfo.fromMap(Map<String, dynamic>.from(item)));
+      }
+    }
+    return AssetDetail(
+      localIdentifier: (m['localIdentifier'] as String?) ?? '',
+      creationDate: (m['creationDate'] as num?)?.toDouble() ?? 0,
+      modificationDate: (m['modificationDate'] as num?)?.toDouble() ?? 0,
+      pixelWidth: (m['pixelWidth'] as num?)?.toInt() ?? 0,
+      pixelHeight: (m['pixelHeight'] as num?)?.toInt() ?? 0,
+      mediaType: (m['mediaType'] as String?) ?? '',
+      duration: (m['duration'] as num?)?.toDouble() ?? 0,
+      isFavorite: m['isFavorite'] == true,
+      isHidden: m['isHidden'] == true,
+      originalFilename: (m['originalFilename'] as String?) ?? '',
+      subtypes: ((m['subtypes'] as List<dynamic>?) ?? const [])
+          .map((e) => e.toString())
+          .toList(),
+      hasLocation: m['hasLocation'] == true,
+      resources: res,
+    );
+  }
+}
+
+/// 一份资源文件的信息
+class AssetResourceInfo {
+  final int type;
+  final String uti;
+  final int fileSize;
+  final String originalFilename;
+
+  const AssetResourceInfo({
+    required this.type,
+    required this.uti,
+    required this.fileSize,
+    required this.originalFilename,
+  });
+
+  factory AssetResourceInfo.fromMap(Map<String, dynamic> m) => AssetResourceInfo(
+        type: (m['type'] as num?)?.toInt() ?? 0,
+        uti: (m['uti'] as String?) ?? '',
+        fileSize: (m['fileSize'] as num?)?.toInt() ?? 0,
+        originalFilename: (m['originalFilename'] as String?) ?? '',
+      );
+
+  String get typeLabel {
+    // PHAssetResourceType 的 rawValue → 可读名称
+    const names = {
+      1: 'photo',
+      2: 'video',
+      3: 'pairedVideo',
+      4: 'fullSizePhoto',
+      5: 'fullSizeVideo',
+      6: 'fullSizePairedVideo',
+      7: 'poster',
+      8: 'alternatePhoto',
+      9: 'alternateVideo',
+      10: 'alternatePairedVideo',
+      11: 'adjustment',
+      12: 'adjustmentBase',
+      13: 'thumbnail',
+      14: 'auxiliaryThumbnail',
+      15: 'auxiliaryMetadata',
+    };
+    return names[type] ?? 'type$type';
+  }
+
+  String get sizeText {
+    if (fileSize <= 0) return '—';
+    if (fileSize >= 1024 * 1024) {
+      return '${(fileSize / 1024 / 1024).toStringAsFixed(1)} MB';
+    }
+    if (fileSize >= 1024) return '${(fileSize / 1024).toStringAsFixed(0)} KB';
+    return '$fileSize B';
+  }
+}
+
+/// 取单个资产的完整信息；相册里找不到时返回 null
+  static Future<AssetDetail?> fetchAssetDetail(String localIdentifier) async {
+    if (localIdentifier.isEmpty) {
+      return null;
+    }
+    try {
+      final result = await _channel.invokeMethod('getAssetDetail', {
+        'localIdentifier': localIdentifier,
+      });
+      if (result is Map) {
+        return AssetDetail.fromMap(Map<String, dynamic>.from(result));
+      }
+    } catch (e) {
+      print('[PhotoLibrary] 读取资产详情失败: $e');
+    }
+    return null;
+  }
+
   /// 获取所有照片资源信息（通过原生通道）
   /// 返回 List<Map>，包含 localIdentifier, creationDate, mediaType, isLivePhoto
   static Future<List<Map<String, dynamic>>> fetchAllAssets() async {

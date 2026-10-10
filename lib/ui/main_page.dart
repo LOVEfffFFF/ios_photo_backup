@@ -12,6 +12,7 @@ import '../managers/restore_manager.dart';
 import '../managers/record_store.dart';
 import '../services/server_client.dart';
 import '../services/server_config.dart';
+import 'compare_page.dart';
 
 /// 主界面
 class MainPage extends StatefulWidget {
@@ -748,6 +749,28 @@ class _MainPageState extends State<MainPage> {
             ),
             Text(
               '清空本机记录，让下次备份重新核对全部照片（服务器设置保留）',
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+            ),
+            const Divider(height: 24),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: _isOperating
+                    ? null
+                    : () => Navigator.of(context).push(
+                          MaterialPageRoute(
+                              builder: (_) => const ComparePage()),
+                        ),
+                icon: const Icon(Icons.compare_arrows, size: 18),
+                label: const Text('备份信息对比'),
+                style: TextButton.styleFrom(
+                  padding: EdgeInsets.zero,
+                ),
+              ),
+            ),
+            Text(
+              '逐项对比「电脑上的备份记录」与「手机里的原图」，'
+              '看清备份到底存了什么、丢了什么',
               style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
             ),
           ],
