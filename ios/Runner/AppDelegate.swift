@@ -101,6 +101,16 @@ import Network
             }
 
             let location = asset.location
+            // PHAsset 没有公开的 originalFilename / formatDescriptions，
+            // 用 KVC 读取（Photos 界面显示的文件名与格式就在这两个属性里）
+            var originalFilename = ""
+            if let name = asset.value(forKey: "originalFilename") as? String {
+                originalFilename = name
+            }
+            var formatDescriptions: [String] = []
+            if let formats = asset.value(forKey: "formatDescriptions") as? [String] {
+                formatDescriptions = formats
+            }
             let detail: [String: Any] = [
                 "localIdentifier": asset.localIdentifier,
                 "creationDate": asset.creationDate?.timeIntervalSince1970 ?? 0,
@@ -111,12 +121,12 @@ import Network
                 "duration": asset.duration,
                 "isFavorite": asset.isFavorite,
                 "isHidden": asset.isHidden,
-                "originalFilename": asset.originalFilename,
+                "originalFilename": originalFilename,
                 "subtypes": Self.subtypeNames(asset),
                 "hasLocation": location != nil,
                 "latitude": location?.coordinate.latitude ?? 0,
                 "longitude": location?.coordinate.longitude ?? 0,
-                "formatDescriptions": asset.formatDescriptions as [String],
+                "formatDescriptions": formatDescriptions,
                 "resourceCount": resourceList.count,
                 "resources": resourceList,
             ]
@@ -144,9 +154,13 @@ import Network
             12: "延时摄影",          // videoTimelapse
             13: "电影效果",          // videoCinematic
         ]
-        return asset.mediaSubtypes
-            .map { names[$0.rawValue] }
-            .compactMap { $0 }
+        var result: [String] = []
+        for subtype in asset.mediaSubtypes {
+            if let name = names[subtype.rawValue] {
+                result.append(name)
+            }
+        }
+        return result
     }
 
     // MARK: - 查询相册资产是否仍存在
