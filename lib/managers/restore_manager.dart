@@ -532,19 +532,36 @@ Future<String?> _saveWithExtras(
     }
 
     try {
-      final id = await PhotoLibraryHelper.savePhotoWithExtras(
+      final r = await PhotoLibraryHelper.savePhotoWithExtras(
         filePath: mainPath,
         creationTimestamp: timestamp,
         extras: downloaded,
       );
-      if (id != null && downloaded.length < record.extraResources.length) {
+      if (!r.ok) {
+        LogService.instance.write(
+          LogLevel.error,
+          'restore',
+          '$base 写入相册失败：${r.error ?? "未知原因"}',
+        );
+        return null;
+      }
+      // 部分降级如实记录 —— 编辑指令被拒不影响 RAW 是否保住
+      if (r.failed > 0 || r.warning != null) {
+        LogService.instance.write(
+          LogLevel.warn,
+          'restore',
+          '$base 恢复完成，但 ${r.failed} 个附加资源未能写入'
+          '${r.warning != null ? "：${r.warning}" : ""}'
+          '（已写入 ${r.written}/${record.extraResources.length}）',
+        );
+      } else if (record.extraResources.isNotEmpty) {
         LogService.instance.write(
           LogLevel.info,
           'restore',
-          '$base 恢复时只写入了 ${downloaded.length}/${record.extraResources.length} 个附加资源',
+          '$base 恢复完成，${r.written} 个附加资源全部写入（含 RAW 原图与编辑指令）',
         );
       }
-      return id;
+      return r.assetId;
     } finally {
       for (final f in cleanup) {
         await _safeDelete(File(f));

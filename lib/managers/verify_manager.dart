@@ -278,10 +278,66 @@ class VerifyManager {
         }
       }
       if (restoredId.isEmpty) {
-        restoredId = await PhotoLibraryHelper.savePhotoToLibrary(
-          filePath: mainPath,
-          creationTimestamp: record.creationTimestamp,
-        ) ?? '';
+        // 附加资源（GAP-R1/R2）：RAW 原图 / Adjustments.plist / .aae
+        //
+        // 之前这里只用 savePhotoToLibrary 写主文件，于是往返验证导入的副本
+        // 永远是「只有 JPEG 的半个资产」—— 相册认不出 RAW，
+        // 看起来像恢复失败，其实是这个验证环节自己没覆盖全。
+        final extras = <Map<String, String>>[];
+        final tempFiles = <String>[];
+        for (final res in record.extraResources) {
+          if (res.relativePath.isEmpty) continue;
+          final target = p.join(tempDir.path,
+              'vfy_${p.basenameWithoutExtension(record.relativePath)}.${res.role}${res.extension}');
+          try {
+            await client.downloadFile(
+              relativePath: res.relativePath,
+              targetPath: target,
+            );
+            extras.add({
+              'restoreType': res.restoreType,
+              'path': target,
+            });
+            tempFiles.add(target);
+          } catch (e) {
+            LogService.instance.write(
+              LogLevel.warn,
+              'verify',
+              '附加资源 ${res.role} 下载失败（不影响验证主文件）: $e',
+            );
+          }
+        }
+
+        if (extras.isNotEmpty) {
+          final r = await PhotoLibraryHelper.savePhotoWithExtras(
+            filePath: mainPath,
+            creationTimestamp: record.creationTimestamp,
+            extras: extras,
+          );
+          restoredId = r.assetId;
+          for (final f in tempFiles) {
+            _safeDelete(f);
+          }
+          if (!r.ok) {
+            // 降级：至少把主文件写进去，别让整个验证失败
+            restoredId = await PhotoLibraryHelper.savePhotoToLibrary(
+              filePath: mainPath,
+              creationTimestamp: record.creationTimestamp,
+            ) ?? '';
+          } else if (r.failed > 0) {
+            LogService.instance.write(
+              LogLevel.warn,
+              'verify',
+              '副本写入时 ${r.failed} 个附加资源被相册拒收'
+              '${r.warning != null ? "：${r.warning}" : ""}',
+            );
+          }
+        } else {
+          restoredId = await PhotoLibraryHelper.savePhotoToLibrary(
+            filePath: mainPath,
+            creationTimestamp: record.creationTimestamp,
+          ) ?? '';
+        }
       }
 
       // ---- ④ 读副本的资源哈希（真正验证相册里的那份）----

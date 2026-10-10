@@ -703,63 +703,117 @@ private func photoBackupSignalHandler(_ sig: Int32) {
 
 /// 写入照片，**并把附加资源一起挂上去**（GAP-R1 / GAP-R2）
 ///
-/// ## 为什么不能只写主文件
-/// 一个 ProRAW 资产由多个文件组成：RAW 原图（DNG）、Adjustments.plist（用户选的
-/// 风格）、.aae（编辑数据）。只写主文件的话，恢复后相册认不出 RAW、风格也没了。
+/// ## 关键限制：资源只能在**创建时**添加
+/// `PHAssetCreationRequest` 只存在于创建流程中；资产创建完成后，
+/// **没有公开 API 可以再往已有资产上追加资源**。
+/// 所以「先建主文件、再补 DNG」这种思路技术上走不通，
+/// 只能一次性把全部资源交给 `addResource`。
 ///
-/// ## 附加资源怎么写
-/// PHAssetCreationRequest.addResource 的第二个参数是 [PHAssetResourceType]。
-/// 我们在 Dart 侧按 UTI 判定好「语义类型」传进来（如 adjustmentEnvelope），
-/// 这里映射成对应的枚举值——**不用 rawValue 硬编码**，因为该枚举在不同 iOS
-/// 版本上成员有增减（实测 poster / type16 就不在公开枚举里）。
+/// ## 为什么必须逐级降级重试
+/// 实测（2026-10-11）：带编辑指令（Adjustments.plist / .aae）写入时
+/// `performChanges` 整体失败 —— 因为 PHAssetResourceType **没有公开的
+/// adjustment 枚举成员**，塞进去的 plist / aae 相册不认。
+/// 一次失败就整条放弃的话，主文件和 62MB 的 DNG 都会丢。
+/// 因此改成逐级降级：能带多少带多少，绝不让「风格」拖累「原图」。
+///
+/// 返回：{ id, written, failed, warning, error }
 private func savePhotoWithExtras(call: FlutterMethodCall, result: @escaping FlutterResult) {
     guard let args = call.arguments as? [String: Any],
           let filePath = args["filePath"] as? String,
           let creationDateTimeInterval = args["creationDate"] as? Double else {
-        result(false)
+        result(["id": NSNull(), "error": "参数不完整"])
         return
     }
     let fileURL = URL(fileURLWithPath: filePath)
     guard FileManager.default.fileExists(atPath: filePath) else {
-        result(false)
+        result(["id": NSNull(), "error": "主文件不存在"])
         return
     }
 
     // 附加资源：[{restoreType, path, uti, filename}]
-    var extras: [(type: PHAssetResourceType, url: URL)] = []
+    struct Extra { let type: PHAssetResourceType; let url: URL; let kind: String }
+    var extras: [Extra] = []
     if let list = args["extraResources"] as? [[String: Any]] {
         for item in list {
             guard let p = item["path"] as? String,
                   FileManager.default.fileExists(atPath: p) else { continue }
             let kind = item["restoreType"] as? String ?? "alternate"
             guard let t = Self.phAssetResourceType(forRestoreType: kind) else { continue }
-            extras.append((t, URL(fileURLWithPath: p)))
+            extras.append(Extra(type: t, url: URL(fileURLWithPath: p), kind: kind))
         }
     }
+
+    // 编辑指令类：iOS 没有公开的枚举成员，写入很可能被拒。
+    // 把它们排到最后，降级时优先舍弃，保住 RAW 原图。
+    let isAdjustment = { (e: Extra) -> Bool in
+        e.kind == "adjustmentPlist" || e.kind == "adjustmentEnvelope"
+    }
+    let safeExtras = extras.filter { !isAdjustment($0) }
+    let adjustmentExtras = extras.filter { isAdjustment($0) }
 
     let creationDate = Date(timeIntervalSince1970: creationDateTimeInterval / 1000.0)
-    var newLocalIdentifier: String?
 
-    PHPhotoLibrary.shared().performChanges {
-        let request = PHAssetCreationRequest.forAsset()
-        try? request.addResource(with: .photo, fileURL: fileURL, options: nil)
-        for e in extras {
-            try? request.addResource(with: e.type, fileURL: e.url, options: nil)
-        }
-        request.creationDate = creationDate
-        newLocalIdentifier = request.placeholderForCreatedAsset?.localIdentifier
-    } completionHandler: { success, error in
-        DispatchQueue.main.async {
-            if let error = error {
-                print("PhotoBackup: Save photo(with extras) failed: \(error)")
+    // 三级尝试：全部 → 只留安全资源 → 只写主文件
+    let attempts: [[Extra]] = [
+        safeExtras + adjustmentExtras,
+        safeExtras,
+        [],
+    ]
+
+    func attempt(_ index: Int, lastError: String?) {
+        let batch = attempts[index]
+        var newId: String?
+        var failure: String?
+
+        PHPhotoLibrary.shared().performChanges {
+            let request = PHAssetCreationRequest.forAsset()
+            // 主文件用 .photo 写入 —— 这是最稳的路径
+            do {
+                try request.addResource(with: .photo, fileURL: fileURL, options: nil)
+            } catch {
+                failure = "主文件写入被拒: \(error.localizedDescription)"
+                return
             }
-            if success, let id = newLocalIdentifier {
-                result(id)
-            } else {
-                result(false)
+            for e in batch {
+                do {
+                    try request.addResource(with: e.type, fileURL: e.url, options: nil)
+                } catch {
+                    // 单个资源失败不应该毁掉整批：photo 已经加进去了
+                    failure = "附加资源(\(e.kind))写入被拒: \(error.localizedDescription)"
+                }
+            }
+            request.creationDate = creationDate
+            newId = request.placeholderForCreatedAsset?.localIdentifier
+        } completionHandler: { success, error in
+            DispatchQueue.main.async {
+                if success, let id = newId {
+                    let dropped = attempts[0].count - batch.count
+                    result([
+                        "id": id,
+                        "written": batch.count,
+                        "failed": dropped,
+                        "warning": dropped > 0
+                            ? "\(dropped) 个附加资源未被相册接受（编辑指令类），已跳过"
+                            : (failure == nil ? nil : failure!),
+                        "error": NSNull(),
+                    ])
+                    return
+                }
+                let msg = failure
+                    ?? error?.localizedDescription
+                    ?? "performChanges 返回失败但无错误信息"
+                if index + 1 < attempts.count {
+                    print("PhotoBackup: 写入相册第 \(index + 1) 次尝试失败(\(msg))，降级重试")
+                    attempt(index + 1, lastError: msg)
+                } else {
+                    print("PhotoBackup: 写入相册全部尝试均失败: \(msg)")
+                    result(["id": NSNull(), "error": "三级降级后仍失败：\(msg)"])
+                }
             }
         }
     }
+
+    attempt(0, lastError: nil)
 }
 
 /// Dart 侧传来的语义类型 → PHAssetResourceType

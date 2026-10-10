@@ -322,32 +322,75 @@ static Future<({int deleted, int failed, String? error})> deleteAssets(
   }
 }
 
+/// 写入照片的结果
+class SaveWithExtrasResult {
+  const SaveWithExtrasResult({
+    required this.assetId,
+    this.written = 0,
+    this.failed = 0,
+    this.warning,
+    this.error,
+  });
+
+  /// 新资产的 localIdentifier（失败时为空串）
+  final String assetId;
+
+  /// 实际挂上去的附加资源数
+  final int written;
+
+  /// 被相册拒收的附加资源数
+  final int failed;
+
+  /// 部分降级时的说明（例如编辑指令未被接受）
+  final String? warning;
+
+  /// 完全失败的原因
+  final String? error;
+
+  bool get ok => assetId.isNotEmpty;
+}
+
 /// 写入照片到相册，并**把附加资源一起挂上去**（GAP-R1 / GAP-R2）
 ///
-/// [extras] 里的每一项是 `{restoreType, path}`：
-///   · main 文件用 `.photo` 写入
-///   · RAW 原图 / Adjustments.plist / .aae 等附加资源按 restoreType 映射成
-///     对应的资源类型一并写入，恢复后相册才能认出 RAW、还原风格
+/// [extras] 里每一项是 `{restoreType, path}`：
+///   · main 文件用 `.photo` 写入（最稳的路径）
+///   · RAW 原图按 restoreType 映射成对应资源类型一并写入
+///   · 编辑指令（.plist / .aae）iOS 没有公开的枚举成员，很可能被拒 ——
+///     原生会逐级降级重试，绝不让「风格」拖累「原图」
 ///
-/// 失败返回 null。旧记录没有附加资源时行为与从前一致。
-static Future<String?> savePhotoWithExtras({
+/// 完全失败返回 [SaveWithExtrasResult] 里 `ok == false`。
+static Future<SaveWithExtrasResult> savePhotoWithExtras({
   required String filePath,
   required double creationTimestamp,
   List<Map<String, String>> extras = const [],
 }) async {
   try {
-    final result = await _channel.invokeMethod('savePhotoWithExtras', {
+    final raw = await _channel.invokeMethod('savePhotoWithExtras', {
       'filePath': filePath,
       'creationDate': creationTimestamp * 1000,
       if (extras.isNotEmpty) 'extraResources': extras,
     });
-    return result is String && result.isNotEmpty ? result : null;
+    if (raw is String) {
+      // 旧版原生只返回路径字符串
+      return SaveWithExtrasResult(
+        assetId: raw.isNotEmpty ? raw : '',
+        error: raw.isEmpty ? '原生返回空结果' : null,
+      );
+    }
+    if (raw is Map) {
+      return SaveWithExtrasResult(
+        assetId: '${raw['id'] ?? ''}',
+        written: (raw['written'] as num?)?.toInt() ?? 0,
+        failed: (raw['failed'] as num?)?.toInt() ?? 0,
+        warning: raw['warning'] as String?,
+        error: raw['error'] as String?,
+      );
+    }
+    return const SaveWithExtrasResult(assetId: '', error: '原生返回格式异常');
   } on PlatformException catch (e) {
-    print('[PhotoLibrary] 写入照片(含附加资源) 失败(PlatformException): ${e.message}');
-    return null;
+    return SaveWithExtrasResult(assetId: '', error: e.message ?? '$e');
   } catch (e) {
-    print('[PhotoLibrary] 写入照片(含附加资源) 失败: $e');
-    return null;
+    return SaveWithExtrasResult(assetId: '', error: '$e');
   }
 }
 
