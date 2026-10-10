@@ -654,7 +654,7 @@ private func photoBackupSignalHandler(_ sig: Int32) {
             return "pairedVideo"
         case .photo, .fullSizePhoto, .alternatePhoto:
             return "main"
-        case .video, .fullSizeVideo, .alternateVideo:
+        case .video, .fullSizeVideo:
             return "main"
         default:
             // 枚举里未识别的类型：只有 UTI 确实是媒体格式时才备份，
@@ -676,7 +676,7 @@ private func photoBackupSignalHandler(_ sig: Int32) {
     ) -> PHAssetResource? {
         let order: [PHAssetResourceType] = [
             .fullSizePhoto, .photo, .alternatePhoto,
-            .fullSizeVideo, .video, .alternateVideo,
+            .fullSizeVideo, .video,
         ]
         for t in order {
             if let hit = classified.first(where: { $0.resource.type == t }) {
