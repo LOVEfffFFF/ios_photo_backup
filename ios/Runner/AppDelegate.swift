@@ -505,11 +505,10 @@ private func photoBackupSignalHandler(_ sig: Int32) {
         case .fullSizePhoto: return "fullSizePhoto"
         case .fullSizeVideo: return "fullSizeVideo"
         case .fullSizePairedVideo: return "fullSizePairedVideo"
-        case .poster: return "poster"
         case .alternatePhoto: return "alternatePhoto"
-        case .alternateVideo: return "alternateVideo"
-        case .alternatePairedVideo: return "alternatePairedVideo"
-        case .fullSizePoster: return "fullSizePoster"
+        // 注意：poster / alternateVideo / alternatePairedVideo / fullSizePoster
+        // 在 PHAssetResourceType 里并不存在（它们只出现在旧文档与网络资料里），
+        // 写进 switch 会编译失败。遇到未知值由 default 兜底。
         default: return "type(\(t.rawValue))"
         }
     }
@@ -554,6 +553,7 @@ private func photoBackupSignalHandler(_ sig: Int32) {
                 handle.write(data)
                 total += data.count
             },
+            options: options,
             completionHandler: { error in
                 handle.closeFile()
                 if let error = error {
