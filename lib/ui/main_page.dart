@@ -145,10 +145,13 @@ class _MainPageState extends State<MainPage> {
     sb.writeln('服务器: ${_config.isConfigured ? _config.baseUrl : '未配置'}');
     sb.writeln('本次上限: ${_parseLimit() == 0 ? '不限制' : '${_parseLimit()} 个'}');
 
-    // 本机记录状态：判断「沙盒是否丢过」的关键
+    // 本机记录状态：判断「沙盒是否丢过」的关键。
+    // records 提到 try 外——下面「电脑清单概况」还要用它做对照。
+    var localRecordCount = 0;
     try {
       final store = RecordStore();
       final records = await store.loadAllRecords();
+      localRecordCount = records.length;
       final file = await FileHelper.getRecordsFile();
       final exists = await file.exists();
       final size = exists ? await file.length() : 0;
@@ -179,6 +182,39 @@ class _MainPageState extends State<MainPage> {
     for (final line in _logs) {
       sb.writeln(line);
     }
+
+    // 电脑清单概况：这是「手机记录 vs 电脑实际文件」最直接的证据。
+    // 不做逐文件校验（那是接收端 /verify 的事，App 侧复算一遍代价太高），
+    // 只报条数与构成，够判断「清单是不是空的」「有没有退化成推断数据」。
+    try {
+      if (_config.isConfigured) {
+        final raw = await ServerClient(_config).downloadManifest();
+        sb.writeln('--- 电脑清单概况 ---');
+        if (raw == null || raw.isEmpty) {
+          sb.writeln('拉取失败或清单为空（接收端可能没启动）');
+        } else {
+          final byPath = <String, Map<String, dynamic>>{};
+          for (final e in raw) {
+            final p = e['serverPath'];
+            if (p is String) byPath[p] = e;
+          }
+          var inferred = 0, live = 0;
+          for (final e in byPath.values) {
+            if (e['inferred'] == true) inferred++;
+            if (e['mediaType'] == 'live_photo') live++;
+          }
+          sb.writeln('清单总行数: ${raw.length}（去重后 ${byPath.length} 个文件）');
+          sb.writeln('实况照片: $live 个');
+          sb.writeln('推断数据(inferred=true): $inferred 个'
+              '${inferred > 0 ? '  ← 这些是按文件名反推的，重装 App 后会被权威数据覆盖' : ''}');
+          sb.writeln('本机记录: $localRecordCount 条'
+              '${localRecordCount == 0 && byPath.isNotEmpty ? '  ← 本机记录为空（沙盒丢过），但电脑清单有数据' : ''}');
+        }
+      }
+    } catch (e) {
+      sb.writeln('电脑清单概况读取失败: $e');
+    }
+
     return sb.toString();
   }
 

@@ -2,9 +2,11 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../app_info.dart';
 import '../helpers/photo_library_helper.dart';
 import '../managers/record_store.dart';
 import '../models/backup_record.dart';
+import '../services/log_service.dart';
 import '../services/server_client.dart';
 import '../services/server_config.dart';
 
@@ -32,6 +34,13 @@ class _ComparePageState extends State<ComparePage> {
   AssetDetail? _phoneDetail;
   bool _loadingPhone = false;
 
+  /// 当前选中的备份记录。单独存一份是因为 _pick 里只把 localIdentifier
+  /// 拿去向原生查询了，record 本身被丢弃了 —— 而导出报告需要它。
+  BackupRecord? _picked;
+
+  ServerConfig _config = ServerConfig.empty;
+  bool _uploading = false;
+
   @override
   void initState() {
     super.initState();
@@ -44,10 +53,10 @@ class _ComparePageState extends State<ComparePage> {
       _recordError = null;
     });
     try {
+      final config = await ServerConfig.load();
       var records = await RecordStore().loadAllRecords();
       if (records.isEmpty) {
         // 本地没有记录时，退回用电脑清单重建
-        final config = await ServerConfig.load();
         if (config.isConfigured) {
           final client = ServerClient(config);
           final raw = await client.downloadManifest();
@@ -58,6 +67,7 @@ class _ComparePageState extends State<ComparePage> {
       }
       if (!mounted) return;
       setState(() {
+        _config = config;
         _records = records;
         _loadingRecords = false;
       });
@@ -73,6 +83,7 @@ class _ComparePageState extends State<ComparePage> {
   /// 选中一条备份记录 → 去手机里找对应资产
   Future<void> _pick(BackupRecord record) async {
     setState(() {
+      _picked = record;
       _phoneDetail = null;
       _loadingPhone = true;
     });
@@ -84,12 +95,196 @@ class _ComparePageState extends State<ComparePage> {
     });
   }
 
+  /// 生成对比结果报告（纯文本，用于上传到电脑留档）
+  ///
+  /// 为什么需要导出：对比结果是**一次性观察**——想拿它去查问题时，
+  /// 往往已经不在那台手机上了。留在手机里等于没留。
+  String _buildReport() {
+    final sb = StringBuffer();
+    final now = DateTime.now();
+    String two(int n) => n.toString().padLeft(2, '0');
+    final ts = '${now.year}${two(now.month)}${two(now.day)}-'
+        '${two(now.hour)}${two(now.minute)}${two(now.second)}';
+
+    sb.writeln('=== PhotoBackup 备份信息对比报告 ===');
+    sb.writeln('生成时间: ${now.toString()}');
+    sb.writeln('App 版本: ${AppInfo.display}');
+    sb.writeln('服务器: ${_config.isConfigured ? _config.baseUrl : '未配置'}');
+    sb.writeln('记录来源: ${_records.isEmpty ? '无' : (_picked == null ? '本地记录/电脑清单' : '本地记录/电脑清单')}');
+
+    // ---- 备份记录总览 ----
+    sb.writeln('');
+    sb.writeln('--- 备份记录总览（共 ${_records.length} 条）---');
+    if (_records.isNotEmpty) {
+      final byType = <String, int>{};
+      var live = 0, withPrints = 0;
+      var minT = double.infinity, maxT = 0.0;
+      for (final r in _records) {
+        byType[r.mediaType] = (byType[r.mediaType] ?? 0) + 1;
+        if (r.mediaType == 'live_photo') live++;
+        if (r.pixelWidth != null) withPrints++;
+        if (r.creationTimestamp < minT) minT = r.creationTimestamp;
+        if (r.creationTimestamp > maxT) maxT = r.creationTimestamp;
+      }
+      byType.forEach((k, v) => sb.writeln('  $k: $v 条'));
+      sb.writeln('  实况照片: $live 条');
+      sb.writeln('  含像素宽高: $withPrints / ${_records.length}'
+          '${withPrints == 0 ? '  ← 旧版 App 写的记录，指纹会退化' : ''}');
+      if (minT.isFinite) {
+        sb.writeln('  时间跨度: ${_fmtTime(minT)} ~ ${_fmtTime(maxT)}');
+      }
+
+      // 同一秒多条的情况：这是 GAP-O1 的实证数据，顺序信息只存在于记录里
+      final bySecond = <int, int>{};
+      for (final r in _records) {
+        final s = r.creationTimestamp.floor();
+        bySecond[s] = (bySecond[s] ?? 0) + 1;
+      }
+      final multi = bySecond.values.where((v) => v > 1).length;
+      sb.writeln('  同秒多条: $multi 组 / ${bySecond.length} 个不同的秒'
+          '${multi > 0 ? '（同秒照片的先后顺序只存在于记录中）' : ''}');
+    }
+
+    // ---- 逐项对比结果 ----
+    final rec = _picked;
+    final phone = _phoneDetail;
+    sb.writeln('');
+    if (rec == null) {
+      sb.writeln('--- 逐项对比 ---');
+      sb.writeln('（未选中任何记录，报告只含总览）');
+    } else {
+      final name = rec.relativePath.split('/').last;
+      sb.writeln('--- 逐项对比：$name ---');
+      sb.writeln('');
+      sb.writeln('[备份记录侧]');
+      sb.writeln('  相对路径: ${rec.relativePath}');
+      sb.writeln('  资产 ID: ${rec.localIdentifier}');
+      sb.writeln('  拍摄时间: ${_fmtTime(rec.creationTimestamp)}'
+          '  (亚秒 ${rec.creationTimestamp.toStringAsFixed(6)})');
+      sb.writeln('  媒体类型: ${rec.mediaType}');
+      sb.writeln('  像素宽高: ${rec.pixelWidth}x${rec.pixelHeight}');
+      if (rec.livePhotoVideoRelativePath != null) {
+        sb.writeln('  配对视频: ${rec.livePhotoVideoRelativePath}');
+      }
+
+      sb.writeln('');
+      if (phone == null) {
+        sb.writeln('[手机原图侧]');
+        sb.writeln('  未取到（照片可能已被删除，或查询失败）');
+      } else {
+        sb.writeln('[手机原图侧]');
+        sb.writeln('  资产 ID: ${phone.localIdentifier}');
+        sb.writeln('  拍摄时间: ${_fmtTime(phone.creationDate)}');
+        sb.writeln('  修改时间: ${_fmtTime(phone.modificationDate)}');
+        sb.writeln('  媒体类型: ${phone.mediaType}');
+        sb.writeln('  像素宽高: ${phone.pixelWidth}x${phone.pixelHeight}');
+        sb.writeln('  时长: ${phone.duration} 秒');
+        sb.writeln('  收藏: ${phone.isFavorite ? '是' : '否'}');
+        sb.writeln('  隐藏: ${phone.isHidden ? '是' : '否'}');
+        sb.writeln('  原始文件名: ${phone.originalFilename.isEmpty ? '(取不到)' : phone.originalFilename}');
+        sb.writeln('  有位置信息: ${phone.hasLocation ? '是' : '否'}');
+        sb.writeln('  特殊类型: ${phone.subtypes.isEmpty ? '(无)' : phone.subtypes.join(', ')}');
+
+        // 资源构成：这是判断「一份照片到底由哪些文件组成」的关键
+        // （ProRAW = DNG+JPEG、人像深度图、HDR 增益图等）
+        sb.writeln('');
+        sb.writeln('  资源构成（${phone.resources.length} 个文件）:');
+        for (final res in phone.resources) {
+          sb.writeln('    - [${res.typeLabel}] ${res.originalFilename}');
+          sb.writeln('      UTI: ${res.uti}');
+        }
+
+        // 一致性判定：哪些字段对不上
+        sb.writeln('');
+        sb.writeln('  一致性判定:');
+        _cmp(sb, '资产 ID', rec.localIdentifier, phone.localIdentifier);
+        _cmp(sb, '媒体类型', rec.mediaType, phone.mediaType);
+        _cmp(sb, '像素宽高',
+            '${rec.pixelWidth}x${rec.pixelHeight}',
+            '${phone.pixelWidth}x${phone.pixelHeight}');
+        // 拍摄时间允许亚秒级差异（备份侧保留 6 位小数）
+        final dt = (rec.creationTimestamp - phone.creationDate).abs();
+        _cmp(sb, '拍摄时间',
+            rec.creationTimestamp.toStringAsFixed(6),
+            phone.creationDate.toStringAsFixed(6),
+            note: dt < 0.001 ? null : '相差 ${dt.toStringAsFixed(3)} 秒');
+      }
+    }
+
+    sb.writeln('');
+    sb.writeln('--- 报告结束 ---');
+    return sb.toString();
+  }
+
+  /// 写一行对比结果，不一致时标出差异
+  void _cmp(StringBuffer sb, String label, String a, String b, {String? note}) {
+    final same = a == b;
+    sb.writeln('    $label: $a  vs  $b   → ${same ? '一致' : '不一致'}${note != null ? '  ($note)' : ''}');
+  }
+
+  /// 把对比报告上传到电脑（落到 iPhoneBackup\logs\）
+  ///
+  /// 复用日志上传通道：/log 按文件名覆盖写，同一份报告重复上传不会膨胀。
+  Future<void> _uploadReport() async {
+    if (_uploading) return;
+    if (!_config.isConfigured) {
+      _toast('未配置服务器地址，无法上传');
+      return;
+    }
+    setState(() => _uploading = true);
+    var ok = false;
+    var msg = '';
+    try {
+      final now = DateTime.now();
+      String two(int n) => n.toString().padLeft(2, '0');
+      final name = 'compare-${now.year}${two(now.month)}${two(now.day)}'
+          '-${two(now.hour)}${two(now.minute)}${two(now.second)}.log';
+      final client = ServerClient(_config);
+      ok = await client.uploadLog(name, _buildReport());
+      msg = ok
+          ? '已上传：iPhoneBackup\\logs\\$name'
+          : '上传失败（接收端未启动或地址不可达）';
+    } catch (e) {
+      msg = '上传失败：$e';
+    }
+    if (!mounted) return;
+    setState(() => _uploading = false);
+    _toast(msg, ok: ok);
+    // 顺带记进日志，这样日志里也能看到用户做过对比分析
+    LogService.instance.write(
+      LogLevel.info,
+      'compare',
+      '导出对比报告: $msg',
+    );
+  }
+
+  void _toast(String msg, {bool ok = true}) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        backgroundColor: ok ? null : Colors.red.shade700,
+        duration: const Duration(seconds: 4),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text('备份信息对比'),
         actions: [
+          IconButton(
+            onPressed: _uploading ? null : _uploadReport,
+            icon: _uploading
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.cloud_upload),
+            tooltip: '导出对比结果到电脑',
+          ),
           IconButton(
             onPressed: _loadRecords,
             icon: const Icon(Icons.refresh),
