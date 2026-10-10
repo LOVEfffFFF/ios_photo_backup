@@ -1,11 +1,22 @@
 import 'package:flutter/material.dart';
 
+import 'app_info.dart';
+import 'services/log_service.dart';
 import 'ui/main_page.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  // 屏幕常亮改为「传输期间」按需开启，避免 App 装好后设备永不自动锁屏
-  runApp(const PhotoBackupApp());
+
+  // 全局异常捕获必须包住 runApp：runApp 之后抛出的未捕获错误会被
+  // FlutterError.onError / PlatformDispatcher.onError 接住，
+  // runZonedGuarded 负责兜住异步未 await 的异常。
+  // 三层都装上，任何一处崩溃都能留下日志。
+  LogService.runGuarded(() async {
+    final logs = LogService.instance;
+    await logs.init();
+    logs.write(LogLevel.info, 'app', '应用启动，${AppInfo.display}');
+    runApp(const PhotoBackupApp());
+  });
 }
 
 class PhotoBackupApp extends StatelessWidget {

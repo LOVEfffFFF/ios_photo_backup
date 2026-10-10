@@ -215,6 +215,22 @@ class PhotoLibraryHelper {
     return null;
   }
 
+  /// 追加一行日志到沙盒日志文件（Documents/logs/app.log）
+  ///
+  /// 走原生通道而不是 Dart 直接写文件，是因为原生侧用的是 stdio 追加写，
+  /// 与崩溃日志的写入方式一致 —— 同一个文件里既有运行日志又有崩溃现场，
+  /// 才能还原「崩溃前最后做了什么」。
+  ///
+  /// 故意不做 await 也不抛异常：写日志本身失败不该影响业务，
+  /// 而且崩溃路径上调用它时往往已经不能安全地等待异步结果了。
+  static void appendLogNative(String line) {
+    if (line.isEmpty) return;
+    _channel.invokeMethod('appendLog', {'line': line}).catchError((_) {
+      // 忽略：日志写不进去也不能让业务失败
+      return false;
+    });
+  }
+
   /// 获取所有照片资源信息（通过原生通道）
   /// 返回 List<Map>，包含 localIdentifier, creationDate, mediaType, isLivePhoto
   static Future<List<Map<String, dynamic>>> fetchAllAssets() async {

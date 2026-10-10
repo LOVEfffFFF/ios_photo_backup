@@ -259,6 +259,44 @@ class ServerClient {
     }
   }
 
+  /// 上传单个日志文件到电脑（覆盖写，同一份重复上传不会膨胀）
+  ///
+  /// 与 [uploadDiagnostics] 的分工：
+  ///   · /diagnostics 追加一段文本到单个文件，用于人工上报诊断摘要
+  ///   · /log      按文件名覆盖写入 logs\ 目录，用于同步完整的日志/崩溃日志
+  ///
+  /// 返回 true 表示成功。日志上传失败不应影响主流程，因此这里返回 bool
+  /// 而不是抛异常（抛异常只能由调用方决定要不要吞掉，反而更容易漏）。
+  Future<bool> uploadLog(String name, String content) async {
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 10);
+    try {
+      final request =
+          await client.postUrl(Uri.parse('${config.baseUrl}/log'));
+      if (config.token.isNotEmpty) {
+        request.headers.set('X-Auth-Token', config.token);
+      }
+      request.headers.set('X-Log-Name', name);
+      request.headers.set('Content-Type', 'text/plain; charset=utf-8');
+      final bytes = utf8.encode(content);
+      request.contentLength = bytes.length;
+      request.add(bytes);
+
+      final response = await request.close().timeout(
+            const Duration(seconds: 30),
+          );
+      await response.drain<void>();
+      return response.statusCode == 200;
+    } on TimeoutException {
+      return false;
+    } catch (_) {
+      // 接收端没启动 / 网络不通：日志传不上去不是错误，下次启动再试
+      return false;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   /// 读取电脑上的元数据清单（manifest.jsonl）
   ///
   /// 返回解析后的条目列表；连接失败 / 非 200 时返回 null。

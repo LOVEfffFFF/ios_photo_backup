@@ -10,9 +10,11 @@ import '../helpers/photo_library_helper.dart';
 import '../managers/backup_manager.dart';
 import '../managers/restore_manager.dart';
 import '../managers/record_store.dart';
+import '../services/log_service.dart';
 import '../services/server_client.dart';
 import '../services/server_config.dart';
 import 'compare_page.dart';
+import 'logs_page.dart';
 
 /// 主界面
 class MainPage extends StatefulWidget {
@@ -74,6 +76,9 @@ class _MainPageState extends State<MainPage> {
   Future<void> _loadConfig() async {
     final config = await ServerConfig.load();
     if (!mounted) return;
+    // 日志服务需要 client 才能上传日志；配置读出来就能构造了。
+    // 用户在下方改变地址时也会重新构造并重新绑定（见 _saveConfig）。
+    LogService.instance.attachClient(ServerClient(config));
     setState(() {
       _config = config;
       if (config.isConfigured) {
@@ -773,8 +778,51 @@ class _MainPageState extends State<MainPage> {
               '看清备份到底存了什么、丢了什么',
               style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
             ),
+            const Divider(height: 24),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: _isOperating ? null : () => _openLogsPage(context),
+                icon: const Icon(Icons.bug_report, size: 18),
+                label: const Text('日志与崩溃分析'),
+                style: TextButton.styleFrom(
+                  padding: EdgeInsets.zero,
+                ),
+              ),
+            ),
+            Text(
+              '查看本机日志与崩溃记录，一键上报到电脑 iPhoneBackup\\logs\\',
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+            ),
           ],
         ),
+      ),
+    );
+  }
+
+  /// 打开日志页；进入前先自动上报一次
+  ///
+  /// 用户闪退后重新打开 App，意图通常就是「把日志发过去」，
+  /// 不该还要他再点一次按钮。失败静默（接收端可能没启动），
+  /// 页面上仍可手动重试。
+  Future<void> _openLogsPage(BuildContext context) async {
+    final config = _config;
+    if (config.isConfigured) {
+      final logs = LogService.instance;
+      logs.attachClient(ServerClient(config));
+      try {
+        final n = await logs.upload();
+        if (mounted && n > 0) {
+          _addLog('✅ 已自动上报 $n 个日志文件（含可能的崩溃日志）');
+        }
+      } catch (_) {
+        // 接收端没启动时静默失败，页面上可以手动重试
+      }
+    }
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => const LogsPage(),
       ),
     );
   }

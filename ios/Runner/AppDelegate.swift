@@ -5,6 +5,74 @@ import UniformTypeIdentifiers
 import Network
 import ObjectiveC
 
+// MARK: - 崩溃捕获的底层工具（顶层函数）
+//
+// 这些必须是顶层函数：signal() 要求 @convention(c) 函数指针，只有全局函数能传。
+// 全部基于 stdio（fopen/fwrite/fputs/fclose 都属于 async-signal-safe），
+// 因此在信号处理上下文里调用是安全的 —— 崩溃现场最忌讳的就是再崩溃一次。
+
+/// 信号处理器写日志的路径。信号上下文里不能调 Objective-C API（可能死锁），
+/// 所以在安装阶段就把路径备好。
+private var g_signalLogPath: UnsafeMutablePointer<CChar>?
+
+/// 安装前的系统异常处理器，崩溃记录完要交回给它
+private var g_prevExceptionHandler: (@convention(c) (NSException) -> Void)?
+
+/// 用 C stdio 追加写入文本。不用 Swift 的 File/Foundation 是为了 signal 安全。
+private func appendCrashText(_ text: String, toPath path: String) {
+    text.withCString { cstr in
+        if let fp = fopen(path, "a") {
+            fputs(cstr, fp)
+            fclose(fp)
+        }
+    }
+}
+
+/// 同上，直接写字节（用于避免不必要的字符串拷贝）
+private func appendCrashText(_ bytes: UnsafeRawPointer, length: Int, toPath path: String) {
+    if let fp = fopen(path, "ab") {
+        if length > 0 {
+            _ = fwrite(bytes, 1, length, fp)
+        }
+        fclose(fp)
+    }
+}
+
+/// 信号名（不用 strsignal：它未必是 async-signal-safe）
+private let kSignalNames: [Int32: String] = [
+    SIGSEGV: "SIGSEGV 非法内存访问", SIGABRT: "SIGABRT abort/断言失败",
+    SIGBUS: "SIGBUS 总线错误", SIGILL: "SIGILL 非法指令",
+    SIGFPE: "SIGFPE 算术错误", SIGTRAP: "SIGTRAP 陷阱（如强制解包 nil）",
+]
+
+/// POSIX 信号处理器：覆盖 Swift 运行时的内存错误（ObjC 异常处理器拦不住这些）
+private func photoBackupSignalHandler(_ sig: Int32) {
+    if let path = g_signalLogPath, let fp = fopen(path, "a") {
+        var now = time(nil)
+        var tbuf = [CChar](repeating: 0, count: 32)
+        strftime(&tbuf, tbuf.count, "%Y-%m-%d %H:%M:%S", localtime(&now))
+        let name = kSignalNames[sig] ?? "未知信号"
+        fprintf(fp, "\n===== 信号崩溃 =====\n[%s] signal=%d (%s)\n",
+                tbuf, Int(sig), name)
+
+        // 回溯调用栈。这里只打印地址，不做符号解析 —— backtrace 是
+        // async-signal-safe 的，而 dladdr/backtrace_symbols 涉及动态链接器，不安全。
+        // 地址本身已经足够定位到崩溃点：配合下面的「崩溃前操作日志」看上下文即可。
+        var frames = [UnsafeMutableRawPointer?](repeating: nil, count: 48)
+        let n = backtrace(&frames, Int32(frames.count))
+        for i in 0..<Int(n) {
+            if let f = frames[i] {
+                fprintf(fp, "    frame %2d  addr=0x%016llx\n", i, UInt(bitPattern: f))
+            }
+        }
+        fprintf(fp, "（上面是内存地址而非符号名；结合崩溃前的操作日志定位）\n")
+        fclose(fp)
+    }
+    // 交回默认行为，让系统照常记录这次崩溃
+    signal(sig, SIG_DFL)
+    raise(sig)
+}
+
 @UIApplicationMain
 @objc class AppDelegate: FlutterAppDelegate {
 
@@ -19,6 +87,9 @@ import ObjectiveC
 
         GeneratedPluginRegistrant.register(with: self)
 
+        // 最先装崩溃捕获器：后面任何一步崩掉都要能留下记录
+        installCrashCapture()
+
         // 注册原生照片桥接插件
         if let controller = window?.rootViewController as? FlutterViewController {
             let messenger = controller.binaryMessenger
@@ -30,6 +101,154 @@ import ObjectiveC
         }
 
         return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+    }
+
+    /// 正常退出（用户手动关闭 / 被系统终止）时清掉启动标记。
+    /// 被 iOS 后台直接回收时不会走到这里 —— 标记会残留，下次启动据此提示「疑似异常退出」。
+    override func applicationWillTerminate(_ application: UIApplication) {
+        clearRunMarker()
+        super.applicationWillTerminate(application)
+    }
+
+    // MARK: - 崩溃捕获与日志落盘
+    //
+    // 崩溃时进程直接死掉，任何「崩溃后再上传」的方案都不可行。真正靠得住的做法是
+    // **崩溃现场把信息写进沙盒文件，下次启动再上报**。分三层覆盖：
+    //
+    //  ① Objective-C 异常（NSSetUncaughtExceptionHandler）
+    //     例如 KVC 读未定义 key 抛的 NSUnknownKeyException。这类异常能拿到完整的
+    //     callStackSymbols，是排查崩溃最有价值的信息。
+    //
+    //  ② POSIX 信号（Swift 运行时的内存错误）
+    //     数组越界、强制解包 nil、栈溢出等，ObjC 异常处理器拦不住，只能靠信号兜底。
+    //     信号上下文里只调 async-signal-safe 函数，因此只写最小必要信息。
+    //
+    //  ③ 异常退出标记
+    //     前两层都没触发但进程没了时兜底。诚实说明：iOS 后台回收**不会**调用
+    //     applicationWillTerminate，会留下标记，所以这一条标为「疑似」而非确证。
+
+    /// 日志目录：Documents/logs（Dart 侧也写同一目录，便于统一上报）
+    static func logsDirectory() -> URL {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let dir = docs.appendingPathComponent("logs", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: dir.path) {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        return dir
+    }
+
+    /// 时间戳：文件名与日志行都用它，保证同一份日志里的时间可排序
+    static func stamp(_ date: Date = Date()) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyyMMdd-HHmmss"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f.string(from: date)
+    }
+
+    /// 追加一行运行日志（与 Dart 侧写入同一批文件）
+    @discardableResult
+    static func appendLogLine(_ line: String) {
+        let path = logsDirectory().appendingPathComponent("app.log").path
+        let text = line.hasSuffix("\n") ? line : line + "\n"
+        if let data = text.data(using: .utf8) {
+            data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+                if let base = raw.baseAddress {
+                    appendCrashText(base, length: raw.count, toPath: path)
+                }
+            }
+        }
+    }
+
+    /// 列出日志文件（崩溃日志优先），供 Dart 侧展示与上报
+    static func listLogs() -> [[String: Any]] {
+        let dir = logsDirectory()
+        let items: [[String: Any]] = []
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]
+        ) else { return items }
+        for f in files where f.pathExtension == "log" {
+            let attrs = try? FileManager.default.attributesOfItem(atPath: f.path)
+            let size = (attrs?[.size] as? NSNumber)?.intValue ?? 0
+            let modified = (attrs?[.modificationDate] as? Date) ?? Date(timeIntervalSince1970: 0)
+            items.append([
+                "name": f.lastPathComponent,
+                "size": size,
+                "modified": modified.timeIntervalSince1970,
+                "isCrash": f.lastPathComponent.hasPrefix("crash"),
+            ])
+        }
+        // 崩溃日志排前面，其余按修改时间倒序
+        return items.sorted {
+            if $0["isCrash"] as! Bool != $1["isCrash"] as! Bool {
+                return $0["isCrash"] as! Bool
+            }
+            return ($0["modified"] as! Double) > ($1["modified"] as! Double)
+        }
+    }
+
+    /// 读取某个日志文件的全部内容
+    static func readLog(_ name: String) -> String? {
+        // 防目录穿越：只允许纯文件名，不接受任何分隔符
+        guard !name.isEmpty, !name.contains("/"), !name.contains("\\"),
+              name.hasSuffix(".log") else { return nil }
+        let path = logsDirectory().appendingPathComponent(name).path
+        return try? String(contentsOfFile: path, encoding: .utf8)
+    }
+
+    /// 启动时检查上次运行是否异常结束，并安装崩溃捕获器
+    func installCrashCapture() {
+        // ③ 异常退出标记：残留即说明上次没走到正常终止
+        let marker = Self.logsDirectory().appendingPathComponent("running.marker")
+        let fm = FileManager.default
+        if fm.fileExists(atPath: marker.path),
+           let attrs = try? fm.attributesOfItem(atPath: marker.path),
+           let created = attrs[.creationDate] as? Date {
+            Self.appendLogLine(
+                "[warn] 上次运行的启动标记仍然存在（标记于 \(Self.stamp(created))）→ "
+                + "上次未走到正常终止。可能是崩溃，也可能是被 iOS 后台回收"
+                + "（iOS 回收进程不调用 applicationWillTerminate），因此不作崩溃确证。")
+        }
+        try? "started \(Self.stamp())".write(to: marker, atomically: true, encoding: .utf8)
+
+        // ① Objective-C 异常
+        g_prevExceptionHandler = NSGetUncaughtExceptionHandler()
+        NSSetUncaughtExceptionHandler { exception in
+            var text = "\n===== Objective-C 崩溃 =====\n"
+            text += "时间: \(AppDelegate.stamp())\n"
+            text += "name: \(exception.name.rawValue)\n"
+            text += "reason: \(exception.reason ?? "无")\n"
+            text += "userInfo: \(exception.userInfo)\n"
+            text += "callStack:\n"
+            for s in exception.callStackSymbols {
+                text += "  \(s)\n"
+            }
+            let path = AppDelegate.logsDirectory()
+                .appendingPathComponent("crash-objc-\(AppDelegate.stamp()).log").path
+            appendCrashText(text, toPath: path)
+            AppDelegate.appendLogLine("[fatal] Objective-C 崩溃: \(exception.name.rawValue) / \(exception.reason ?? "无")")
+
+            // 交回原处理器（通常是系统的崩溃报告器），否则退回 abort
+            if let prev = g_prevExceptionHandler {
+                prev(exception)
+            } else {
+                abort()
+            }
+        }
+
+        // ② POSIX 信号：Swift 运行时的内存错误走这里
+        let crashPath = Self.logsDirectory().appendingPathComponent("crash-signal.log").path
+        g_signalLogPath = strdup(crashPath)
+        for sig in [SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE, SIGTRAP] {
+            signal(sig, photoBackupSignalHandler)
+        }
+
+        Self.appendLogLine("[info] 崩溃捕获器已安装（NSException + 信号 + 异常退出标记）")
+    }
+
+    /// 正常退出时清掉启动标记（被系统回收时不会走到这里）
+    func clearRunMarker() {
+        let marker = Self.logsDirectory().appendingPathComponent("running.marker")
+        try? FileManager.default.removeItem(at: marker)
     }
 
     // MARK: - Method Channel Handler
@@ -56,6 +275,21 @@ import ObjectiveC
             checkAssetsExist(call: call, result: result)
         case "getAssetDetail":
             getAssetDetail(call: call, result: result)
+        case "listLogs":
+            DispatchQueue.global().async { result(AppDelegate.listLogs()) }
+        case "readLog":
+            let args = call.arguments as? [String: Any]
+            let name = args?["name"] as? String ?? ""
+            result(AppDelegate.readLog(name))
+        case "appendLog":
+            let args = call.arguments as? [String: Any]
+            let line = args?["line"] as? String ?? ""
+            if !line.isEmpty {
+                AppDelegate.appendLogLine(line)
+                result(true)
+            } else {
+                result(false)
+            }
         default:
             result(FlutterMethodNotImplemented)
         }
