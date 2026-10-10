@@ -52,8 +52,9 @@ private func photoBackupSignalHandler(_ sig: Int32) {
         var tbuf = [CChar](repeating: 0, count: 32)
         strftime(&tbuf, tbuf.count, "%Y-%m-%d %H:%M:%S", localtime(&now))
         let name = kSignalNames[sig] ?? "未知信号"
-        fprintf(fp, "\n===== 信号崩溃 =====\n[%s] signal=%d (%s)\n",
-                tbuf, Int(sig), name)
+        // 用 fputs 而非 fprintf：fprintf 是变参（variadic）函数，Swift 不可用
+        fputs("\n===== 信号崩溃 =====\n", fp)
+        fputs("[\(String(cString: tbuf))] signal=\(sig) (\(name))\n", fp)
 
         // 回溯调用栈。这里只打印地址，不做符号解析 —— backtrace 是
         // async-signal-safe 的，而 dladdr/backtrace_symbols 涉及动态链接器，不安全。
@@ -62,10 +63,10 @@ private func photoBackupSignalHandler(_ sig: Int32) {
         let n = backtrace(&frames, Int32(frames.count))
         for i in 0..<Int(n) {
             if let f = frames[i] {
-                fprintf(fp, "    frame %2d  addr=0x%016llx\n", i, UInt(bitPattern: f))
+                fputs("    frame \(i)  addr=0x\(String(UInt(bitPattern: f), radix: 16))\n", fp)
             }
         }
-        fprintf(fp, "（上面是内存地址而非符号名；结合崩溃前的操作日志定位）\n")
+        fputs("（上面是内存地址而非符号名；结合崩溃前的操作日志定位）\n", fp)
         fclose(fp)
     }
     // 交回默认行为，让系统照常记录这次崩溃
@@ -162,7 +163,7 @@ private func photoBackupSignalHandler(_ sig: Int32) {
     /// 列出日志文件（崩溃日志优先），供 Dart 侧展示与上报
     static func listLogs() -> [[String: Any]] {
         let dir = logsDirectory()
-        let items: [[String: Any]] = []
+        var items: [[String: Any]] = []
         guard let files = try? FileManager.default.contentsOfDirectory(
             at: dir, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]
         ) else { return items }
@@ -177,12 +178,18 @@ private func photoBackupSignalHandler(_ sig: Int32) {
                 "isCrash": f.lastPathComponent.hasPrefix("crash"),
             ])
         }
-        // 崩溃日志排前面，其余按修改时间倒序
-        return items.sorted {
-            if $0["isCrash"] as! Bool != $1["isCrash"] as! Bool {
-                return $0["isCrash"] as! Bool
+        // 崩溃日志排前面，其余按修改时间倒序。
+        // 用 as? 而不是 as!：字典是 [String: Any]，强转失败会崩 ——
+        // 而这个方法正是崩溃后要调用的，绝不能自己再崩一次。
+        return items.sorted { a, b in
+            let ac = (a["isCrash"] as? Bool) ?? false
+            let bc = (b["isCrash"] as? Bool) ?? false
+            if ac != bc {
+                return ac
             }
-            return ($0["modified"] as! Double) > ($1["modified"] as! Double)
+            let am = (a["modified"] as? Double) ?? 0
+            let bm = (b["modified"] as? Double) ?? 0
+            return am > bm
         }
     }
 
