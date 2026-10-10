@@ -1,4 +1,6 @@
 import '../models/backup_record.dart';
+import '../models/backup_resource.dart';
+import 'log_service.dart';
 import 'server_client.dart';
 
 /// 资产指纹：与设备无关的「是不是同一个资产」判据
@@ -147,6 +149,21 @@ class ManifestEntry {
   /// true = 这条是从文件名反推的（Backfill），不是 App 上传的权威数据
   final bool inferred;
 
+  /// 原图该资产共有几个 PHAssetResource（用于资源完整度核对）
+  final int? resourceTotal;
+
+  /// 资源真实 UTI（如 com.adobe.raw-image）
+  final String uti;
+
+  /// iOS 里的原始文件名（如 IMG_6550.DNG）
+  final String originalFilename;
+
+  /// 是否是资产的主文件
+  ///
+  /// 清单里一个资产会有多条：main / pairedVideo / raw / adjustment / adjustmentAAE。
+  /// 只有 main 才是「一个资产 = 一条备份记录」的主键，其余要归组进 extraResources。
+  bool get isMainFile => role.isEmpty || role == 'main';
+
   const ManifestEntry({
     required this.serverPath,
     required this.assetId,
@@ -161,6 +178,9 @@ class ManifestEntry {
     this.clientSha256 = '',
     this.verifyState = 'unchecked',
     this.inferred = false,
+    this.resourceTotal,
+    this.uti = '',
+    this.originalFilename = '',
   });
 
   bool get isPairedVideo => role == 'pairedVideo';
@@ -179,6 +199,9 @@ class ManifestEntry {
         clientSha256: (e['clientSha256'] as String?) ?? '',
         verifyState: (e['verifyState'] as String?) ?? 'unchecked',
         inferred: e['inferred'] == true,
+        resourceTotal: (e['resourceTotal'] as num?)?.toInt(),
+        uti: (e['uti'] as String?) ?? '',
+        originalFilename: (e['originalFilename'] as String?) ?? '',
       );
 
   /// 该条目对应的资产指纹
@@ -333,20 +356,49 @@ class ManifestIndex {
   /// role=pairedVideo 的行填进它的 `livePhotoVideoRelativePath`。
   List<BackupRecord> toRecords() {
     final pairedByKey = <String, String>{};
+    // 附加资源（GAP-R1/R2）：按 pairKey 归组。
+    //
+    // 缺这段的后果很隐蔽：**备份侧已经把 RAW 原图和编辑指令都传上去了**，
+    // 但沙盒丢失后从清单重建记录时附加资源没被认领，
+    // 于是恢复只下载主文件 —— 表现为「恢复回来认不出 RAW、风格也没了」，
+    // 而备份目录里明明躺着62MB 的 .raw.dng。
+    final extrasByKey = <String, List<BackupResource>>{};
+
     for (final e in entries) {
       if (e.isPairedVideo && e.pairKey.isNotEmpty) {
         pairedByKey[e.pairKey] = e.serverPath;
+        continue;
+      }
+      if (e.isMainFile && e.pairKey.isNotEmpty) {
+        continue; // 主文件走下面的正常路径
+      }
+      // 附加资源：raw / adjustment / adjustmentAAE / alternate
+      if (e.pairKey.isEmpty && e.assetId.isEmpty) {
+        // 没有归组键的孤立条目，挂到自己的 assetId 上（后面按 assetId 兜底匹配）
+        final key = e.assetId.isNotEmpty ? e.assetId : e.pairKey;
+        if (key.isEmpty) continue;
+        (extrasByKey[key] ??= <BackupResource>[]).add(_toBackupResource(e));
+      } else if (!e.isMainFile) {
+        (extrasByKey[e.pairKey] ??= <BackupResource>[]).add(_toBackupResource(e));
       }
     }
 
     final result = <BackupRecord>[];
     for (final e in entries) {
-      if (e.isPairedVideo) {
+      if (e.isPairedVideo || !e.isMainFile) {
         continue;
       }
       final paired = e.pairKey.isEmpty ? null : pairedByKey[e.pairKey];
       final ts = e.createdUnix;
       final ms = ((ts ?? 0) * 1000).round();
+
+      // 先按 pairKey 找，找不到再按 assetId 找 —— 后者覆盖「清单里pairKey
+      // 缺失」的旧数据（Backfill 时代没有 pairKey）
+      final extras = <BackupResource>[
+        ...(extrasByKey[e.pairKey] ?? const <BackupResource>[]),
+        if (e.assetId != e.pairKey)
+          ...(extrasByKey[e.assetId] ?? const <BackupResource>[]),
+      ];
 
       result.add(
         BackupRecord(
@@ -360,9 +412,33 @@ class ManifestIndex {
           livePhotoVideoRelativePath: paired,
           pixelWidth: e.pixelWidth,
           pixelHeight: e.pixelHeight,
+          contentSha256: e.clientSha256,
+          resourceTotal: e.resourceTotal,
+          extraResources: extras,
         ),
+      );
+    }
+
+    // 兜底：清单里只有附加资源、没有主文件的资产（不太可能，但别静默丢数据）
+    final usedKeys = result.map((r) => r.localIdentifier).toSet();
+    for (final entry in extrasByKey.entries) {
+      if (usedKeys.contains(entry.key) || entry.value.isEmpty) continue;
+      LogService.instance.write(
+        LogLevel.warn,
+        'manifest',
+        '清单里有 ${entry.value.length} 个附加资源找不到对应主文件: ${entry.key}',
       );
     }
     return result;
   }
+
+  /// 清单条目 → 备份记录里的附加资源
+  BackupResource _toBackupResource(ManifestEntry e) => BackupResource(
+        role: e.role.isEmpty ? 'alternate' : e.role,
+        relativePath: e.serverPath,
+        sha256: e.clientSha256.isNotEmpty ? e.clientSha256 : e.sha256,
+        bytes: e.size,
+        uti: e.uti,
+        filename: e.originalFilename,
+      );
 }

@@ -99,6 +99,8 @@ class ServerClient {
     int? resourceTotal,
     List<String>? resourcePrimary,
     List<String>? resourceAuxiliary,
+    String? resourceUti,
+    String? resourceFilename,
   }) async {
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 15);
@@ -138,6 +140,14 @@ class ServerClient {
       }
       if (resourceAuxiliary != null && resourceAuxiliary.isNotEmpty) {
         request.headers.set('X-Resource-Auxiliary', resourceAuxiliary.join('|'));
+      }
+      if (resourceUti != null && resourceUti.isNotEmpty) {
+        // 附加资源的真实 UTI —— 恢复时要靠它判断该用哪种资源类型写入
+        // （PHAssetResourceType 没有公开的 adjustment 枚举成员）
+        request.headers.set('X-Resource-Uti', resourceUti);
+      }
+      if (resourceFilename != null && resourceFilename.isNotEmpty) {
+        request.headers.set('X-Resource-Filename', resourceFilename);
       }
       request.headers.contentType = ContentType.binary;
       final length = await file.length();

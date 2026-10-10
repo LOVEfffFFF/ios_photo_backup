@@ -499,6 +499,9 @@ class BackupManager {
           mediaType: 'auxiliary',
           creationTimestamp: creationTimestamp,
           contentSha256: ex.sha256,
+          // UTI 与原始文件名：恢复时靠 UTI 判断该用哪种资源类型写入
+          resourceUti: ex.uti,
+          resourceFilename: ex.filename,
         );
         if (r.success) {
           extraRecords.add(BackupResource(
