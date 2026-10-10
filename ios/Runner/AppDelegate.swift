@@ -155,7 +155,7 @@ import Network
             13: "电影效果",          // videoCinematic
         ]
         var result: [String] = []
-        for subtype in asset.mediaSubtypes {
+        for subtype in Array(asset.mediaSubtypes) {
             if let name = names[subtype.rawValue] {
                 result.append(name)
             }
