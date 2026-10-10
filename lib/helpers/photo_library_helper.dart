@@ -194,7 +194,7 @@ class PhotoLibraryHelper {
     return <String>{};
   }
 
-  /// 取单个资产的完整信息；相册里找不到时返回 null
+  /// 取单个资产的完整信息；相册里找不到、或原生返回异常时返回 null
   static Future<AssetDetail?> fetchAssetDetail(String localIdentifier) async {
     if (localIdentifier.isEmpty) {
       return null;
@@ -206,6 +206,9 @@ class PhotoLibraryHelper {
       if (result is Map) {
         return AssetDetail.fromMap(Map<String, dynamic>.from(result));
       }
+    } on PlatformException catch (e) {
+      // 原生侧异常（如权限不足、资源被删）不应让整个页面崩掉
+      print('[PhotoLibrary] 读取资产详情失败(PlatformException): ${e.message}');
     } catch (e) {
       print('[PhotoLibrary] 读取资产详情失败: $e');
     }

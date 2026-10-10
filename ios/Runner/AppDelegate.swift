@@ -86,31 +86,20 @@ import Network
             // 人像模式的深度图、HDR 的增益图、Live Photo 的配对视频…）
             var resourceList: [[String: Any]] = []
             for r in PHAssetResource.assetResources(for: asset) {
-                // PHAssetResource 没有公开的 fileSize 属性，但 KVC 能取到
-                // （与 Photos 界面显示的文件大小一致）。取不到时返回 0，不影响其他字段。
-                var size = 0
-                if let s = r.value(forKey: "fileSize") as? NSNumber {
-                    size = s.intValue
-                }
                 resourceList.append([
                     "type": r.type.rawValue,
                     "uti": r.uniformTypeIdentifier,
-                    "fileSize": size,
+                    // PHAssetResource 没有公开的文件大小属性，只能留 0。
+                    // 曾经试过用 KVC (value(forKey: "fileSize")) 取，key 不存在时会抛
+                    // Objective-C 异常直接闪退——KVC 读未定义 key 是崩溃，不是返回 nil。
+                    "fileSize": 0,
                     "originalFilename": r.originalFilename,
-                ])
+                    ])
             }
 
             let location = asset.location
-            // PHAsset 没有公开的 originalFilename / formatDescriptions，
-            // 用 KVC 读取（Photos 界面显示的文件名与格式就在这两个属性里）
-            var originalFilename = ""
-            if let name = asset.value(forKey: "originalFilename") as? String {
-                originalFilename = name
-            }
-            var formatDescriptions: [String] = []
-            if let formats = asset.value(forKey: "formatDescriptions") as? [String] {
-                formatDescriptions = formats
-            }
+            // originalFilename / formatDescriptions 都是 PHAsset 的公开属性（iOS 13+），
+            // 部署目标 17.0，可直接用。不要用 KVC —— key 不存在会抛 ObjC 异常闪退。
             let detail: [String: Any] = [
                 "localIdentifier": asset.localIdentifier,
                 "creationDate": asset.creationDate?.timeIntervalSince1970 ?? 0,
@@ -121,12 +110,12 @@ import Network
                 "duration": asset.duration,
                 "isFavorite": asset.isFavorite,
                 "isHidden": asset.isHidden,
-                "originalFilename": originalFilename,
+                "originalFilename": asset.originalFilename,
                 "subtypes": Self.subtypeNames(asset),
                 "hasLocation": location != nil,
                 "latitude": location?.coordinate.latitude ?? 0,
                 "longitude": location?.coordinate.longitude ?? 0,
-                "formatDescriptions": formatDescriptions,
+                "formatDescriptions": asset.formatDescriptions,
                 "resourceCount": resourceList.count,
                 "resources": resourceList,
             ]
