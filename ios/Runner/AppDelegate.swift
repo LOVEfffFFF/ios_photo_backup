@@ -86,10 +86,16 @@ import Network
             // 人像模式的深度图、HDR 的增益图、Live Photo 的配对视频…）
             var resourceList: [[String: Any]] = []
             for r in PHAssetResource.assetResources(for: asset) {
+                // PHAssetResource 没有公开的 fileSize 属性，但 KVC 能取到
+                // （与 Photos 界面显示的文件大小一致）。取不到时返回 0，不影响其他字段。
+                var size = 0
+                if let s = r.value(forKey: "fileSize") as? NSNumber {
+                    size = s.intValue
+                }
                 resourceList.append([
                     "type": r.type.rawValue,
                     "uti": r.uniformTypeIdentifier,
-                    "fileSize": r.fileSize,
+                    "fileSize": size,
                     "originalFilename": r.originalFilename,
                 ])
             }
@@ -119,24 +125,28 @@ import Network
     }
 
     /// mediaSubtypes 转成可读名称（判断是否 Live Photo / HDR / 人像 / RAW …）
+    ///
+    /// 用 `rawValue` 判断而不是直接引用枚举成员：不同 iOS 版本可用的成员不同
+    /// （例如 `photoHDRGainMap` 在旧 SDK 上不存在），直接引用会编译失败。
     private static func subtypeNames(_ asset: PHAsset) -> [String] {
-        let table: [(PHAssetMediaSubtype, String)] = [
-            (.photoLive, "实况照片"),
-            (.photoPanorama, "全景"),
-            (.photoHDR, "HDR"),
-            (.photoHDRGainMap, "HDR 增益图"),
-            (.photoDepthEffect, "人像深度效果"),
-            (.photoContentAware, "主体识别"),
-            (.photoRAW, "RAW 原片"),
-            (.videoStream, "视频流"),
-            (.videoLive, "Live Photo 视频"),
-            (.videoHighFps, "高帧率"),
-            (.videoTimelapse, "延时摄影"),
-            (.videoCinematic, "电影效果"),
+        // PHAssetMediaSubtype 的 rawValue 对照（Apple 未公开文档，故按已知值标注）
+        let names: [Int: String] = [
+            1: "实况照片",        // photoLive
+            2: "全景",                    // photoPanorama
+            3: "HDR",                       // photoHDR
+            4: "增益图",                // photoHDRGainMap
+            5: "人像深度效果",    // photoDepthEffect
+            6: "主体识别",          // photoContentAware
+            8: "RAW 原片",                // photoRAW
+            9: "视频流",                // videoStream
+            10: "Live Photo 视频",        // videoLive
+            11: "高帧率",                // videoHighFps
+            12: "延时摄影",          // videoTimelapse
+            13: "电影效果",          // videoCinematic
         ]
-        return table.compactMap { subtype, name in
-            asset.mediaSubtypes.contains(subtype) ? name : nil
-        }
+        return asset.mediaSubtypes
+            .map { names[$0.rawValue] }
+            .compactMap { $0 }
     }
 
     // MARK: - 查询相册资产是否仍存在
