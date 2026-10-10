@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 import '../helpers/file_helper.dart';
 import '../helpers/photo_library_helper.dart';
 import '../models/backup_record.dart';
+import '../models/backup_resource.dart';
 import '../services/log_service.dart';
 import '../services/manifest_index.dart';
 import '../services/server_client.dart';
