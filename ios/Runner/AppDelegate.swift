@@ -3,6 +3,7 @@ import Flutter
 import Photos
 import UniformTypeIdentifiers
 import Network
+import ObjectiveC
 
 @UIApplicationMain
 @objc class AppDelegate: FlutterAppDelegate {
@@ -98,8 +99,16 @@ import Network
             }
 
             let location = asset.location
-            // originalFilename / formatDescriptions 都是 PHAsset 的公开属性（iOS 13+），
-            // 部署目标 17.0，可直接用。不要用 KVC —— key 不存在会抛 ObjC 异常闪退。
+            // PHAsset 没有公开的 originalFilename / formatDescriptions 属性，
+            // 但用 KVC 直接读有风险：key 不存在会抛 Objective-C 异常导致闪退。
+            // 因此先走运行时检查确认属性真的存在，再读。
+            var originalFilename = (Self.safeKVC(asset, "originalFilename") as? String) ?? ""
+            if originalFilename.isEmpty, let first = resourceList.first {
+                // 兜底：用资源级文件名（PHAssetResource.originalFilename 是公开的）
+                originalFilename = (first["originalFilename"] as? String) ?? ""
+            }
+            let formatDescriptions =
+                (Self.safeKVC(asset, "formatDescriptions") as? [String]) ?? []
             let detail: [String: Any] = [
                 "localIdentifier": asset.localIdentifier,
                 "creationDate": asset.creationDate?.timeIntervalSince1970 ?? 0,
@@ -110,17 +119,34 @@ import Network
                 "duration": asset.duration,
                 "isFavorite": asset.isFavorite,
                 "isHidden": asset.isHidden,
-                "originalFilename": asset.originalFilename,
+                "originalFilename": originalFilename,
                 "subtypes": Self.subtypeNames(asset),
                 "hasLocation": location != nil,
                 "latitude": location?.coordinate.latitude ?? 0,
                 "longitude": location?.coordinate.longitude ?? 0,
-                "formatDescriptions": asset.formatDescriptions,
+                "formatDescriptions": formatDescriptions,
                 "resourceCount": resourceList.count,
                 "resources": resourceList,
             ]
             DispatchQueue.main.async { result(detail) }
         }
+    }
+
+    /// 安全读取私有属性：先确认类里真的定义了这个属性，再用 KVC 取
+    ///
+    /// 为什么需要它：Objective-C 的 `value(forKey:)` 在 key 不存在时会抛
+    /// `NSUnknownKeyException`，这是**崩溃**，不是返回 nil。
+    /// 逐个属性先 `class_getProperty` 确认存在（沿继承链向上找），
+    /// 不存在就直接返回 nil，从而把「可能闪退」变成「拿不到就留空」。
+    private static func safeKVC(_ obj: NSObject, _ key: String) -> Any? {
+        var cls: AnyClass? = object_getClass(obj)
+        while let c = cls {
+            if class_getProperty(c, key) != nil {
+                return obj.value(forKey: key)
+            }
+            cls = class_getSuperclass(c)
+        }
+        return nil
     }
 
     /// mediaSubtypes 转成可读名称（判断是否 Live Photo / HDR / 人像 / RAW …）
