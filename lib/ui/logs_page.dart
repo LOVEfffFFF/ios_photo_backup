@@ -101,7 +101,7 @@ class _LogsPageState extends State<LogsPage> {
                 _Header(
                   fileCount: _files.length,
                   crashCount: crashCount,
-                  build: AppInfo.display,
+                  buildLabel: AppInfo.display,
                 ),
                 const SizedBox(height: 12),
                 FilledButton.icon(
@@ -204,12 +204,14 @@ class _Header extends StatelessWidget {
   const _Header({
     required this.fileCount,
     required this.crashCount,
-    required this.build,
+    required this.buildLabel,
   });
 
   final int fileCount;
   final int crashCount;
-  final String build;
+
+  /// 版本标识。字段名不能叫 build —— 会与 [Widget.build] 冲突。
+  final String buildLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -232,7 +234,7 @@ class _Header extends StatelessWidget {
           ),
           const SizedBox(height: 6),
           Text(
-            'build: $build',
+            'build: $buildLabel',
             style: const TextStyle(fontSize: 11, color: Colors.grey),
           ),
           const SizedBox(height: 4),
