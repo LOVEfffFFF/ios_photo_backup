@@ -322,6 +322,35 @@ static Future<({int deleted, int failed, String? error})> deleteAssets(
   }
 }
 
+/// 写入照片到相册，并**把附加资源一起挂上去**（GAP-R1 / GAP-R2）
+///
+/// [extras] 里的每一项是 `{restoreType, path}`：
+///   · main 文件用 `.photo` 写入
+///   · RAW 原图 / Adjustments.plist / .aae 等附加资源按 restoreType 映射成
+///     对应的资源类型一并写入，恢复后相册才能认出 RAW、还原风格
+///
+/// 失败返回 null。旧记录没有附加资源时行为与从前一致。
+static Future<String?> savePhotoWithExtras({
+  required String filePath,
+  required double creationTimestamp,
+  List<Map<String, String>> extras = const [],
+}) async {
+  try {
+    final result = await _channel.invokeMethod('savePhotoWithExtras', {
+      'filePath': filePath,
+      'creationDate': creationTimestamp * 1000,
+      if (extras.isNotEmpty) 'extraResources': extras,
+    });
+    return result is String && result.isNotEmpty ? result : null;
+  } on PlatformException catch (e) {
+    print('[PhotoLibrary] 写入照片(含附加资源) 失败(PlatformException): ${e.message}');
+    return null;
+  } catch (e) {
+    print('[PhotoLibrary] 写入照片(含附加资源) 失败: $e');
+    return null;
+  }
+}
+
 /// 获取照片资源信息（通过原生通道）
   static Future<List<Map<String, dynamic>>> fetchAllAssets() async {
     try {
@@ -478,6 +507,7 @@ class ExportResult {
     required this.resourceTotal,
     required this.resourcePrimary,
     required this.resourceAuxiliary,
+    this.extraResources = const [],
   });
 
   final String path;
@@ -496,10 +526,18 @@ class ExportResult {
   /// （ProRAW 的第二份、深度图、HDR 增益图、海报…）
   final List<String> resourceAuxiliary;
 
+  /// 主文件之外已导出的资源（GAP-R1 / GAP-R2）
+  ///
+  /// 实测一个开了「风格」的 ProRAW 资产有 4 个资源，主文件只是其中之一：
+  /// RAW 原图（DNG）、Adjustments.plist（风格记录）、.aae（编辑数据）都在这里。
+  final List<ExportedResource> extraResources;
+
+  /// 实际备份了几个文件：主文件 + 附加资源
+  int get backedResourceCount => 1 + extraResources.length;
+
   /// 资源完整度：备份了几个 / 原图共几个
   ///
   /// > 1 说明原图有多个资源而我们只导出了一个 —— 这就是 GAP-R1 的暴露方式。
-  int get backedResourceCount => 1 + resourceAuxiliary.length;
 
   bool get isComplete => resourceTotal > 0 && backedResourceCount >= resourceTotal;
 
@@ -527,6 +565,23 @@ class ExportResult {
       return const [];
     }
 
+    final extras = <ExportedResource>[];
+    final rawExtras = raw['extraResources'];
+    if (rawExtras is List) {
+      for (final item in rawExtras) {
+        if (item is Map) {
+          extras.add(ExportedResource(
+            role: '${item['role'] ?? 'alternate'}',
+            path: '${item['path'] ?? ''}',
+            sha256: '${item['sha256'] ?? ''}',
+            bytes: (item['bytes'] as num?)?.toInt() ?? 0,
+            uti: '${item['uti'] ?? ''}',
+            filename: '${item['filename'] ?? ''}',
+          ));
+        }
+      }
+    }
+
     return ExportResult(
       path: path,
       sha256: (raw['sha256'] as String?) ?? '',
@@ -534,6 +589,7 @@ class ExportResult {
       resourceTotal: (raw['total'] as num?)?.toInt() ?? 0,
       resourcePrimary: splitList(raw['primary']),
       resourceAuxiliary: splitList(raw['auxiliary']),
+      extraResources: extras,
     );
   }
 }
@@ -585,5 +641,38 @@ class AssetResourceHash {
       resourceCount: (m['resourceCount'] as num?)?.toInt() ?? 0,
       resourceSummary: summary,
     );
+  }
+}
+
+/// 原生导出时顺带导出的一个附加资源
+///
+/// 属于「资源导出结果」的一部分：主文件之外的那些资源（RAW 原图、
+/// Adjustments.plist、.aae…），GAP-R1/R2 要求它们一起备份与恢复。
+class ExportedResource {
+  const ExportedResource({
+    required this.role,
+    required this.path,
+    required this.sha256,
+    required this.bytes,
+    required this.uti,
+    required this.filename,
+  });
+
+  /// raw / adjustment / adjustmentAAE / alternate
+  final String role;
+
+  /// 沙盒里的临时文件路径
+  final String path;
+  final String sha256;
+  final int bytes;
+  final String uti;
+
+  /// iOS 里的原始文件名（如 IMG_6550.DNG）
+  final String filename;
+
+  /// 扩展名（含点），用于生成电脑端文件名
+  String get extension {
+    final i = path.lastIndexOf('.');
+    return i < 0 ? '' : path.substring(i);
   }
 }

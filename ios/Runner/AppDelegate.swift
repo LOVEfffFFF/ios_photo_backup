@@ -287,6 +287,8 @@ private func photoBackupSignalHandler(_ sig: Int32) {
             hashAssetResources(call: call, result: result)
         case "deleteAssets":
             deleteAssets(call: call, result: result)
+        case "savePhotoWithExtras":
+            savePhotoWithExtras(call: call, result: result)
         case "listLogs":
             DispatchQueue.global().async { result(AppDelegate.listLogs()) }
         case "readLog":
@@ -615,6 +617,75 @@ private func photoBackupSignalHandler(_ sig: Int32) {
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
+    /// 判断一个资源是否值得备份，并给它一个 role。返回 nil = 不备份。
+    ///
+    /// ## 为什么不能只看 PHAssetResourceType 的优先级
+    /// 实测（2026-10-11）：一个开了「风格」的 ProRAW 资产有 4 个资源
+    ///   photo         IMG_6550.DNG      com.adobe.raw-image       ← RAW 原图
+    ///   poster        Adjustments.plist  com.apple.property-list   ← 编辑指令（风格记在这）
+    ///   type(16)      IMG_6550O.aae     apple-adjustment-envelope ← 编辑数据
+    ///   fullSizeVideo FullSizeRender.jpg public.jpeg              ← 渲染结果
+    ///
+    /// 旧逻辑「按 type 优先级挑一个」挑中的是渲染后的 JPEG，
+    /// **真正的 DNG 被跳过** —— 恢复后相册认不出 RAW。
+    ///
+    /// ## role 含义
+    ///   main          主演示资源（相册里看到的那份）
+    ///   raw           RAW 原图（ProRAW 的 DNG）
+    ///   pairedVideo   Live Photo 配对视频
+    ///   adjustment    Adjustments.plist（用户选的风格）
+    ///   adjustmentAAE .aae 编辑数据封装
+    ///   alternate     其他格式版本
+    private static func classifyResource(_ r: PHAssetResource) -> String? {
+        let uti = r.uniformTypeIdentifier.lowercased()
+
+        // 编辑指令：体积很小但决定了「风格」，绝不能丢
+        if uti.contains("adjustment-envelope") { return "adjustmentAAE" }
+        if uti.contains("property-list") { return "adjustment" }
+
+        // RAW 原图
+        if uti.contains("raw-image") || uti.contains("dng")
+            || uti.contains("adobe.raw") || uti.contains("x-adobe") {
+            return "raw"
+        }
+
+        switch r.type {
+        case .pairedVideo, .fullSizePairedVideo:
+            return "pairedVideo"
+        case .photo, .fullSizePhoto, .alternatePhoto:
+            return "main"
+        case .video, .fullSizeVideo, .alternateVideo:
+            return "main"
+        default:
+            // 枚举里未识别的类型：只有 UTI 确实是媒体格式时才备份，
+            // 纯数据类（缩略图描述、内部索引）跳过，避免备份垃圾
+            if uti.contains("image") || uti.contains("video")
+                || uti.contains("quicktime") || uti.contains("audio") {
+                return "alternate"
+            }
+            return nil
+        }
+    }
+
+    /// 选出「主演示文件」—— 用户在相册里看到的那一份。
+    ///
+    /// 这与「RAW 原图」是**两件事**：编辑过的照片，主文件是渲染后的 JPEG，
+    /// 而 RAW 原图作为附加资源一起备份（GAP-R1）。
+    private static func pickPrimaryResource(
+        _ classified: [(resource: PHAssetResource, role: String)]
+    ) -> PHAssetResource? {
+        let order: [PHAssetResourceType] = [
+            .fullSizePhoto, .photo, .alternatePhoto,
+            .fullSizeVideo, .video, .alternateVideo,
+        ]
+        for t in order {
+            if let hit = classified.first(where: { $0.resource.type == t }) {
+                return hit.resource
+            }
+        }
+        return classified.first(where: { $0.role == "main" })?.resource
+    }
+
     /// 组装导出结果（路径 + 内容哈希 + 资源构成），返回给 Dart
     private func exportResult(
         path: String, sha256: String, bytes: Int, summary: [String: Any]
@@ -628,7 +699,97 @@ private func photoBackupSignalHandler(_ sig: Int32) {
         return out
     }
 
-    // MARK: - 往返验证：清理验证副本
+    // MARK: - 写入照片到相册
+
+/// 写入照片，**并把附加资源一起挂上去**（GAP-R1 / GAP-R2）
+///
+/// ## 为什么不能只写主文件
+/// 一个 ProRAW 资产由多个文件组成：RAW 原图（DNG）、Adjustments.plist（用户选的
+/// 风格）、.aae（编辑数据）。只写主文件的话，恢复后相册认不出 RAW、风格也没了。
+///
+/// ## 附加资源怎么写
+/// PHAssetCreationRequest.addResource 的第二个参数是 [PHAssetResourceType]。
+/// 我们在 Dart 侧按 UTI 判定好「语义类型」传进来（如 adjustmentEnvelope），
+/// 这里映射成对应的枚举值——**不用 rawValue 硬编码**，因为该枚举在不同 iOS
+/// 版本上成员有增减（实测 poster / type16 就不在公开枚举里）。
+private func savePhotoWithExtras(call: FlutterMethodCall, result: @escaping FlutterResult) {
+    guard let args = call.arguments as? [String: Any],
+          let filePath = args["filePath"] as? String,
+          let creationDateTimeInterval = args["creationDate"] as? Double else {
+        result(false)
+        return
+    }
+    let fileURL = URL(fileURLWithPath: filePath)
+    guard FileManager.default.fileExists(atPath: filePath) else {
+        result(false)
+        return
+    }
+
+    // 附加资源：[{restoreType, path, uti, filename}]
+    var extras: [(type: PHAssetResourceType, url: URL)] = []
+    if let list = args["extraResources"] as? [[String: Any]] {
+        for item in list {
+            guard let p = item["path"] as? String,
+                  FileManager.default.fileExists(atPath: p) else { continue }
+            let kind = item["restoreType"] as? String ?? "alternate"
+            guard let t = Self.phAssetResourceType(forRestoreType: kind) else { continue }
+            extras.append((t, URL(fileURLWithPath: p)))
+        }
+    }
+
+    let creationDate = Date(timeIntervalSince1970: creationDateTimeInterval / 1000.0)
+    var newLocalIdentifier: String?
+
+    PHPhotoLibrary.shared().performChanges {
+        let request = PHAssetCreationRequest.forAsset()
+        try? request.addResource(with: .photo, fileURL: fileURL, options: nil)
+        for e in extras {
+            try? request.addResource(with: e.type, fileURL: e.url, options: nil)
+        }
+        request.creationDate = creationDate
+        newLocalIdentifier = request.placeholderForCreatedAsset?.localIdentifier
+    } completionHandler: { success, error in
+        DispatchQueue.main.async {
+            if let error = error {
+                print("PhotoBackup: Save photo(with extras) failed: \(error)")
+            }
+            if success, let id = newLocalIdentifier {
+                result(id)
+            } else {
+                result(false)
+            }
+        }
+    }
+}
+
+/// Dart 侧传来的语义类型 → PHAssetResourceType
+///
+/// ## 只用编译期校验过的枚举成员
+/// PHAssetResourceType 里**没有** poster / alternateVideo /
+/// alternatePairedVideo / fullSizePoster 这几个成员（写进去编译器会报错），
+/// 所以「编辑指令」这类只能落到语义最接近的通用成员上，让相册按 UTI 自行识别。
+private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetResourceType? {
+    switch kind {
+    case "adjustmentEnvelope", "adjustmentPlist":
+        // Adjustments.plist / .aae —— 编辑指令与数据。
+        // 没有对应的公开枚举成员，用 alternatePhoto 承载。
+        return .alternatePhoto
+    case "pairedVideo":
+        return .pairedVideo
+    case "fullSizePhoto":
+        return .fullSizePhoto
+    case "photo":
+        return .photo
+    case "video":
+        return .video
+    case "fullSizeVideo":
+        return .fullSizeVideo
+    default:
+        return .alternatePhoto
+    }
+}
+
+// MARK: - 往返验证：清理验证副本
 
 /// 删除指定的资产（仅用于清理「往返验证」创建的副本）
 ///
@@ -796,42 +957,88 @@ private func hashAssetResources(call: FlutterMethodCall, result: @escaping Flutt
         // 直接写资源原始字节：requestImageDataAndOrientation 拿到的是解码后的数据，
         // 再写死 .jpg 会让 HEIC/RAW 变成「内容与扩展名不符」的坏文件
         let resources = PHAssetResource.assetResources(for: asset)
-        guard let resource = resources.first(where: { $0.type == .fullSizePhoto })
-            ?? resources.first(where: { $0.type == .photo })
-            ?? resources.first(where: { $0.type == .alternatePhoto }) else {
+
+        // GAP-R1/R2：**导出全部值得备份的资源**，而不是按 type 挑一个。
+        // 旧逻辑挑中渲染后的 JPEG，把 RAW 原图和编辑指令全丢了。
+        let classified: [(resource: PHAssetResource, role: String)] = resources
+            .compactMap { r in
+                guard let role = Self.classifyResource(r) else { return nil }
+                return (resource: r, role: role)
+            }
+
+        guard let primary = Self.pickPrimaryResource(classified) else {
             result(false)
             return
         }
-
-        // 扩展名由资源真实类型推导
-        let ext = Self.preferredExtension(forUTI: resource.uniformTypeIdentifier)
-        let targetURL = URL(fileURLWithPath: targetPath)
-            .deletingPathExtension()
-            .appendingPathExtension(ext)
+        // 主文件之外的其他资源（DNG / Adjustments.plist / .aae …）
+        let extras = classified.filter { $0.resource !== primary }
 
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = isNetworkAccessAllowed
         let summary = Self.resourceSummary(asset)
+        let assetId = asset.localIdentifier
 
-        // 回调可能触发多次，且必须切回主线程才能安全调用 FlutterResult
-        var responded = false
-        exportResource(resource, to: targetURL, options: options) { outcome in
-            DispatchQueue.main.async {
-                guard !responded else { return }
-                responded = true
-                switch outcome {
-                case .success(let info):
-                    result(self.exportResult(
-                        path: targetURL.path,
-                        sha256: info.sha256,
-                        bytes: info.bytes,
-                        summary: summary))
-                case .failure(let error):
+        // 先导主文件，拿到路径后再导出附加资源（附加资源的文件名基于主文件）
+        exportResource(primary, to: Self.targetURL(for: targetPath, resource: primary),
+                       options: options) { outcome in
+            switch outcome {
+            case .failure(let error):
+                DispatchQueue.main.async {
                     print("PhotoBackup: Failed to write photo: \(error)")
                     result(false)
                 }
+            case .success(let info):
+                let mainURL = Self.targetURL(for: targetPath, resource: primary)
+                // 导出附加资源（逐个，失败不阻断主文件）
+                var extraResults: [[String: Any]] = []
+                let group = DispatchGroup()
+                let lock = NSLock()
+                for item in extras {
+                    group.enter()
+                    let url = Self.extraResourceURL(mainURL: mainURL, role: item.role, resource: item.resource)
+                    self.exportResource(item.resource, to: url, options: options) { r in
+                        if case .success(let info2) = r {
+                            lock.lock()
+                            extraResults.append([
+                                "role": item.role,
+                                "path": url.path,
+                                "sha256": info2.sha256,
+                                "bytes": info2.bytes,
+                                "uti": item.resource.uniformTypeIdentifier,
+                                "filename": item.resource.originalFilename,
+                            ])
+                            lock.unlock()
+                        }
+                        group.leave()
+                    }
+                }
+                group.notify(queue: .global()) {
+                    var payload = self.exportResult(
+                        path: mainURL.path, sha256: info.sha256,
+                        bytes: info.bytes, summary: summary)
+                    payload["extraResources"] = extraResults
+                    DispatchQueue.main.async { result(payload) }
+                }
             }
         }
+    }
+
+    /// 主文件的目标路径：按资源真实 UTI 推导扩展名
+    private static func targetURL(for targetPath: String, resource: PHAssetResource) -> URL {
+        let ext = preferredExtension(forUTI: resource.uniformTypeIdentifier)
+        return URL(fileURLWithPath: targetPath)
+            .deletingPathExtension()
+            .appendingPathExtension(ext)
+    }
+
+    /// 附加资源的文件名：主文件名 + 角色后缀，避免与主文件重名
+    private static func extraResourceURL(
+        mainURL: URL, role: String, resource: PHAssetResource
+    ) -> URL {
+        let ext = preferredExtension(forUTI: resource.uniformTypeIdentifier)
+        let base = mainURL.deletingPathExtension().lastPathComponent
+        return mainURL.deletingLastPathComponent()
+            .appendingPathComponent("\(base).\(role).\(ext)")
     }
 
     // MARK: - 导出视频

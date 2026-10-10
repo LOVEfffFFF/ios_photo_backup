@@ -1,3 +1,5 @@
+import 'backup_resource.dart';
+
 /// 单条备份记录数据模型
 class BackupRecord {
   /// 照片在相册中的唯一标识
@@ -44,9 +46,27 @@ class BackupRecord {
   /// （ProRAW 的第二份、深度图、HDR 增益图、海报…）
   final List<String> resourceAuxiliary;
 
-  /// 资源完整度：备份了 1（主文件）+ N（辅助）。
-  /// 原图资源数大于这个值，说明有资源没被导出（GAP-R1 的暴露方式）。
-  int get backedResourceCount => 1 + resourceAuxiliary.length;
+  /// 主文件与配对视频之外的其他资源文件（GAP-R1 / GAP-R2）
+  ///
+  /// 旧设计一条记录只能对应一个文件，于是多资源资产（ProRAW 的 DNG、
+  /// Adjustments.plist、.aae）会被丢掉 —— 表现为恢复后相册认不出 RAW、
+  /// 用户选的风格也没了。现在改为一条记录挂多个资源。
+  ///
+  /// 旧记录没有这个字段时为空列表，恢复逻辑会退回到「只恢复主文件」，
+  /// 与旧版本行为一致（不会出错，只是补不回历史上丢掉的资源）。
+  final List<BackupResource> extraResources;
+
+  /// 实际备份了几个文件：主文件 1 个 + 配对视频（若有）+ 附加资源
+  ///
+  /// 以前只能靠 `resourceAuxiliary.length` 猜（"没被备份的辅助资源"），
+  /// 现在 [extraResources] 落地了，可以数出真实数量。
+  int get backedResourceCount =>
+      1 +
+      (livePhotoVideoRelativePath != null &&
+              livePhotoVideoRelativePath!.isNotEmpty
+          ? 1
+          : 0) +
+      extraResources.length;
 
   /// 资源是否完整导出。旧记录没有 resourceTotal 时返回 null（无法判断）。
   bool? get isResourceComplete {
@@ -69,6 +89,7 @@ class BackupRecord {
     this.resourceTotal,
     this.resourcePrimary = const [],
     this.resourceAuxiliary = const [],
+    this.extraResources = const [],
     double? creationTimestamp,
   }) : creationTimestamp =
             creationTimestamp ?? creationDate.millisecondsSinceEpoch / 1000.0;
@@ -93,6 +114,10 @@ class BackupRecord {
           .map((e) => '$e').toList(),
       resourceAuxiliary: ((json['resourceAuxiliary'] as List?) ?? const [])
           .map((e) => '$e').toList(),
+      extraResources: ((json['extraResources'] as List?) ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(BackupResource.fromJson)
+          .toList(),
     );
   }
 
@@ -111,6 +136,7 @@ class BackupRecord {
       'resourceTotal': resourceTotal,
       'resourcePrimary': resourcePrimary,
       'resourceAuxiliary': resourceAuxiliary,
+      'extraResources': extraResources.map((e) => e.toJson()).toList(),
     };
   }
 }

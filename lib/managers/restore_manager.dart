@@ -9,6 +9,7 @@ import '../helpers/file_helper.dart';
 import '../helpers/photo_library_helper.dart';
 import '../models/backup_record.dart';
 import '../services/manifest_index.dart';
+import '../services/log_service.dart';
 import '../services/server_client.dart';
 import '../services/server_config.dart';
 import 'record_store.dart';
@@ -415,33 +416,138 @@ class RestoreManager {
       }
 
       // 写入系统相册，拿到新资产的 localIdentifier
-      String? newAssetId;
-      if (record.mediaType == 'video') {
-        newAssetId = await PhotoLibraryHelper.saveVideoToLibrary(
-          filePath: mainPath,
-          creationTimestamp: effectiveTimestamp,
-        );
-      } else if (videoPath != null) {
-        newAssetId = await PhotoLibraryHelper.saveLivePhotoToLibrary(
-          photoPath: mainPath,
-          videoPath: videoPath,
-          creationTimestamp: effectiveTimestamp,
-        );
-      } else {
-        newAssetId = await PhotoLibraryHelper.savePhotoToLibrary(
-          filePath: mainPath,
-          creationTimestamp: effectiveTimestamp,
-        );
-      }
+          String? newAssetId;
+          if (record.mediaType == 'video') {
+            newAssetId = await PhotoLibraryHelper.saveVideoToLibrary(
+              filePath: mainPath,
+              creationTimestamp: effectiveTimestamp,
+            );
+          } else if (videoPath != null) {
+            newAssetId = await PhotoLibraryHelper.saveLivePhotoToLibrary(
+              photoPath: mainPath,
+              videoPath: videoPath,
+              creationTimestamp: effectiveTimestamp,
+            );
+          } else if (record.extraResources.isNotEmpty) {
+            // 有附加资源（ProRAW 的 DNG / Adjustments.plist / .aae）时，
+            // 必须一起写入 —— 只写主文件的话恢复后相册认不出 RAW、风格也会丢（GAP-R1/R2）
+            newAssetId = await _saveWithExtras(
+        record, mainPath, effectiveTimestamp, client, manifest);
+          } else {
+            newAssetId = await PhotoLibraryHelper.savePhotoToLibrary(
+              filePath: mainPath,
+              creationTimestamp: effectiveTimestamp,
+            );
+          }
 
-      if (newAssetId == null) {
-        throw Exception('写入相册失败');
-      }
-      return _RestoreOutcome(newAssetId, totalBytes);
-    } finally {
-      await _safeDelete(File(mainPath));
+          if (newAssetId == null) {
+            throw Exception('写入相册失败');
+          }
+          return _RestoreOutcome(newAssetId, totalBytes);
+        } finally {
+          await _safeDelete(File(mainPath));
       if (videoPath != null) {
         await _safeDelete(File(videoPath));
+      }
+    }
+  }
+
+  /// 下载记录的附加资源并与主文件一起写入相册（GAP-R1 / GAP-R2）
+///
+/// ## 为什么要一起写
+/// ProRAW 资产由多个文件组成：DNG（原图）、Adjustments.plist（用户选的风格）、
+/// .aae（编辑数据）。只写主文件，相册认不出 RAW，风格也没了。
+///
+/// ## 容错策略
+/// 附加资源**下载或校验失败不阻断恢复** —— 主文件能恢复就恢复，
+/// 附加资源缺失只是少了一部分信息，比整条失败好。
+Future<String?> _saveWithExtras(
+  BackupRecord record,
+  String mainPath,
+  double timestamp,
+  ServerClient client,
+  ManifestIndex? manifest,
+) async {
+  final tempDir = await FileHelper.getUploadTempDirectory();
+    final base = p.basename(mainPath);
+    final downloaded = <Map<String, String>>[];
+    final cleanup = <String>[];
+
+    for (final res in record.extraResources) {
+      if (res.relativePath.isEmpty) continue;
+      final target = p.join(tempDir.path, '$base.${res.role}${res.extension}');
+      try {
+        await client.downloadFile(
+          relativePath: res.relativePath,
+          targetPath: target,
+        );
+        // 字节级校验：既要比落盘侧，也要比原图侧（能发现「备份的本来就不对」）
+        final expected = manifest?.sha256Of(res.relativePath);
+        final clientSha = manifest?.clientSha256Of(res.relativePath);
+        if (expected != null || clientSha != null) {
+          final actual = (await sha256.bind(File(target).openRead()).first)
+              .toString();
+          if (expected != null && actual != expected) {
+            LogService.instance.write(
+              LogLevel.warn,
+              'restore',
+              '附加资源 ${res.role} 校验不通过（传输损坏），跳过: $base',
+            );
+            await _safeDelete(File(target));
+            continue;
+          }
+          if (clientSha != null && actual != clientSha) {
+            LogService.instance.write(
+              LogLevel.warn,
+              'restore',
+              '附加资源 ${res.role} 与原图哈希不一致（备份当时就不完整），跳过: $base',
+            );
+            await _safeDelete(File(target));
+            continue;
+          }
+        }
+        downloaded.add({
+          'restoreType': res.restoreType,
+          'path': target,
+          'uti': res.uti,
+          'filename': res.filename,
+        });
+        cleanup.add(target);
+      } catch (e) {
+        LogService.instance.write(
+          LogLevel.warn,
+          'restore',
+          '附加资源 ${res.role} 下载失败（不阻断恢复）: $e',
+        );
+        await _safeDelete(File(target));
+      }
+    }
+
+    if (downloaded.isEmpty) {
+      // 一个都没拿到，退回只写主文件
+      return PhotoLibraryHelper.savePhotoToLibrary(
+        filePath: mainPath,
+        creationTimestamp: timestamp,
+      );
+    }
+
+    try {
+      final id = await PhotoLibraryHelper.savePhotoWithExtras(
+        filePath: mainPath,
+        creationTimestamp: timestamp,
+        extras: downloaded,
+      );
+      if (id != null && downloaded.length < record.extraResources.length) {
+        LogService.instance.write(
+          LogLevel.info,
+          'restore',
+          '$base 恢复时只写入了 ${downloaded.length}/${record.extraResources.length} 个附加资源',
+        );
+      }
+      return id;
+    } finally {
+      for (final f in cleanup) {
+        await _safeDelete(File(f));
       }
     }
   }

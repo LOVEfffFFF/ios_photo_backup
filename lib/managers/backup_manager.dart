@@ -465,20 +465,71 @@ class BackupManager {
       if (!result.success) {
         throw Exception(result.message ?? '上传失败');
       }
-
-      // 资源完整度告警：原图有多个资源而我们只导出了一个（ProRAW 双份、
-      // 深度图、增益图…）。这不是错误，但必须让用户知道备份不完整。
-      if (!exportResult.isComplete) {
-        LogService.instance.write(
-          LogLevel.warn,
-          'backup',
-          '资源不完整：${p.basename(actualPath)} 原图共 ${exportResult.resourceTotal} 个资源，'
-          '已备份主文件 1 个，未备份 ${exportResult.resourceAuxiliary.join(', ')}',
-        );
-      }
     } finally {
       // 无论成功失败都删除暂存文件，手机不长期占用空间
       await _safeDelete(photoFile);
+    }
+
+    // ---- 附加资源（GAP-R1 / GAP-R2）----
+    //
+    // 主文件之外的那些资源：RAW 原图（DNG）、Adjustments.plist（用户选的风格）、
+    // .aae（编辑数据）。少了它们，ProRAW 恢复后相册认不出 RAW、风格也没了。
+    //
+    // 每个资源单独上传并单独记账，用 role 区分、pairKey 与主文件相同，
+    // 这样接收端能按资产把多文件归到一起，恢复时一并写回相册。
+    final extraRecords = <BackupResource>[];
+    for (final ex in exportResult.extraResources) {
+      final exFile = File(ex.path);
+      if (!await exFile.exists()) {
+        continue;
+      }
+      // 文件名带角色后缀，一眼能看出是干什么的
+      final baseName = p.basenameWithoutExtension(actualPath);
+      final ext = ex.extension.isEmpty ? '.bin' : ex.extension;
+      final serverName = '$baseName.${ex.role}$ext';
+      final exServerPath = FileHelper.buildServerPath(creationDate, serverName);
+      try {
+        final r = await client.uploadFile(
+          file: exFile,
+          relativePath: exServerPath,
+          assetId: localIdentifier,
+          pairKey: localIdentifier,
+          role: ex.role,
+          mediaType: 'auxiliary',
+          creationTimestamp: creationTimestamp,
+          contentSha256: ex.sha256,
+        );
+        if (r.success) {
+          extraRecords.add(BackupResource(
+            role: ex.role,
+            relativePath: exServerPath,
+            sha256: ex.sha256,
+            bytes: ex.bytes,
+            uti: ex.uti,
+            filename: ex.filename,
+          ));
+        } else {
+          LogService.instance.write(
+            LogLevel.warn,
+            'backup',
+            '附加资源上传失败 ${ex.role}(${ex.filename}): ${r.message}',
+          );
+        }
+      } finally {
+        await _safeDelete(exFile);
+      }
+    }
+
+    // 资源完整度告警：导出后仍有未备份的资源时告知用户。
+    // 这不是错误，但必须让人知道备份不完整。
+    if (!exportResult.isComplete) {
+      LogService.instance.write(
+        LogLevel.warn,
+        'backup',
+        '资源不完整：${p.basename(actualPath)} 原图共 ${exportResult.resourceTotal} 个资源，'
+        '已备份 ${exportResult.backedResourceCount} 个'
+        '${exportResult.resourceAuxiliary.isEmpty ? '' : '，未备份 ${exportResult.resourceAuxiliary.join(', ')}'}',
+      );
     }
 
     // Live Photo 的配对视频
@@ -552,6 +603,7 @@ class BackupManager {
         resourceTotal: exportResult.resourceTotal,
         resourcePrimary: exportResult.resourcePrimary,
         resourceAuxiliary: exportResult.resourceAuxiliary,
+        extraResources: extraRecords,
       ),
     );
 
