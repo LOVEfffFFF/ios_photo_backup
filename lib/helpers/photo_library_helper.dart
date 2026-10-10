@@ -232,8 +232,52 @@ class PhotoLibraryHelper {
   }
 
 
-/// 获取照片资源信息（通过原生通道）
-  /// 返回 List<Map>，包含 localIdentifier, creationDate, mediaType, isLivePhoto
+/// 判断某个资产当前是否还在相册里
+  ///
+  /// 往返验证与恢复去重都要用。
+  static Future<bool> assetExists(String localIdentifier) async {
+    if (localIdentifier.isEmpty) return false;
+    if (_channel == null) return false;
+    try {
+      final result = await _channel.invokeMethod('checkAssetsExist', {
+        'localIdentifiers': [localIdentifier],
+      });
+      if (result is List) return result.isNotEmpty;
+    } catch (e) {
+      print('[PhotoLibrary] 查询资产是否存在失败: $e');
+    }
+    return false;
+  }
+
+  /// 读取某个资产**当前**各资源的字节哈希（只读，不产生副作用）
+  ///
+  /// 往返验证的核心：恢复导入相册后拿副本的资源哈希与原图比对，
+  /// 才能回答「恢复出来的 == 源文件吗」——包括 iOS 导入时是否重新编码、
+  /// 是否剥离 EXIF 这类只有真走一遍才能发现的问题。
+  ///
+  /// [preferVideo] 为 true 时读 Live Photo 的配对视频，否则读主资源。
+  static Future<AssetResourceHash?> hashAssetResources({
+    required String localIdentifier,
+    bool preferVideo = false,
+  }) async {
+    if (localIdentifier.isEmpty) return null;
+    try {
+      final result = await _channel.invokeMethod('hashAssetResources', {
+        'localIdentifier': localIdentifier,
+        'preferVideo': preferVideo,
+      });
+      if (result is Map) {
+        return AssetResourceHash.fromMap(Map<String, dynamic>.from(result));
+      }
+    } on PlatformException catch (e) {
+      print('[PhotoLibrary] 读取资源哈希失败(PlatformException): ${e.message}');
+    } catch (e) {
+      print('[PhotoLibrary] 读取资源哈希失败: $e');
+    }
+    return null;
+  }
+
+  /// 获取照片资源信息（通过原生通道）
   static Future<List<Map<String, dynamic>>> fetchAllAssets() async {
     try {
       final result = await _channel.invokeMethod('fetchAllAssets');
@@ -445,6 +489,56 @@ class ExportResult {
       resourceTotal: (raw['total'] as num?)?.toInt() ?? 0,
       resourcePrimary: splitList(raw['primary']),
       resourceAuxiliary: splitList(raw['auxiliary']),
+    );
+  }
+}
+
+/// 某个资产当前资源的字节哈希（往返验证用）
+///
+/// 由原生侧在**不写入任何东西**的前提下算出：走
+/// `PHAssetResourceManager.requestData` 把资源字节读一遍，边读边算 SHA256。
+class AssetResourceHash {
+  const AssetResourceHash({
+    required this.sha256,
+    required this.bytes,
+    required this.uti,
+    required this.filename,
+    required this.resourceCount,
+    required this.resourceSummary,
+  });
+
+  /// 资源原始字节的 SHA-256
+  final String sha256;
+  final int bytes;
+  final String uti;
+  final String filename;
+
+  /// 该资产共有几个 PHAssetResource
+  final int resourceCount;
+
+  /// {total, primary, auxiliary} —— 用于资源完整度核对
+  final Map<String, dynamic> resourceSummary;
+
+  /// 辅助资源（ProRAW 第二份/深度图/增益图）是否未备份
+  List<String> get unbackedAuxiliary {
+    final aux = resourceSummary['auxiliary'];
+    if (aux is List) return aux.map((e) => '$e').toList();
+    return const [];
+  }
+
+  static AssetResourceHash fromMap(Map<String, dynamic> m) {
+    final summary = <String, dynamic>{};
+    final rawSummary = m['resourceSummary'];
+    if (rawSummary is Map) {
+      summary.addAll(Map<String, dynamic>.from(rawSummary));
+    }
+    return AssetResourceHash(
+      sha256: (m['sha256'] as String?) ?? '',
+      bytes: (m['bytes'] as num?)?.toInt() ?? 0,
+      uti: (m['uti'] as String?) ?? '',
+      filename: (m['filename'] as String?) ?? '',
+      resourceCount: (m['resourceCount'] as num?)?.toInt() ?? 0,
+      resourceSummary: summary,
     );
   }
 }

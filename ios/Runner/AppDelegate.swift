@@ -283,6 +283,8 @@ private func photoBackupSignalHandler(_ sig: Int32) {
             checkAssetsExist(call: call, result: result)
         case "getAssetDetail":
             getAssetDetail(call: call, result: result)
+        case "hashAssetResources":
+            hashAssetResources(call: call, result: result)
         case "listLogs":
             DispatchQueue.global().async { result(AppDelegate.listLogs()) }
         case "readLog":
@@ -624,7 +626,91 @@ private func photoBackupSignalHandler(_ sig: Int32) {
         return out
     }
 
-    // MARK: - 导出照片
+    // MARK: - 往返验证：读取原图资源的哈希
+
+/// 读取某个资产**当前**各资源的字节哈希（不写入任何东西）
+///
+/// 这是「往返验证」的关键：恢复导入相册后，拿副本的资源哈希与原图比对，
+/// 就能回答「恢复出来的 == 源文件吗」——包括 iOS 导入时是否重新编码、
+/// 是否剥离 EXIF 这类只有真正走一遍才能发现的问题。
+///
+/// 只读，不产生任何副作用（不导入、不修改相册）。
+private func hashAssetResources(call: FlutterMethodCall, result: @escaping FlutterResult) {
+    guard let args = call.arguments as? [String: Any],
+          let localIdentifier = args["localIdentifier"] as? String else {
+        result(nil)
+        return
+    }
+    let preferVideo = args["preferVideo"] as? Bool ?? false
+
+    PHPhotoLibrary.requestAuthorization { status in
+        guard self.isPhotoLibraryAccessGranted(status) else {
+            DispatchQueue.main.async { result(nil) }
+            return
+        }
+        let fetchResult = PHAsset.fetchAssets(
+            withLocalIdentifiers: [localIdentifier], options: nil)
+        guard let asset = fetchResult.firstObject else {
+            DispatchQueue.main.async { result(nil) }
+            return
+        }
+        let resources = PHAssetResource.assetResources(for: asset)
+        let target: PHAssetResource?
+        if preferVideo {
+            target = resources.first(where: {
+                $0.type == .pairedVideo || $0.type == .fullSizePairedVideo
+            })
+        } else {
+            target = resources.first(where: { $0.type == .fullSizePhoto })
+                ?? resources.first(where: { $0.type == .photo })
+                ?? resources.first(where: { $0.type == .alternatePhoto })
+                ?? resources.first(where: { $0.type == .fullSizeVideo })
+                ?? resources.first(where: { $0.type == .video })
+        }
+        guard let resource = target else {
+            DispatchQueue.main.async { result(nil) }
+            return
+        }
+
+        let options = PHAssetResourceRequestOptions()
+        options.isNetworkAccessAllowed = true
+        var hasher = SHA256()
+        var total = 0
+        var failed = false
+        PHAssetResourceManager.default().requestData(
+            for: resource,
+            options: options,
+            dataReceivedHandler: { data in
+                hasher.update(data: data)
+                total += data.count
+            },
+            completionHandler: { error in
+                if let error = error {
+                    print("PhotoBackup: 读取资源哈希失败: \(error)")
+                    failed = true
+                }
+                DispatchQueue.main.async {
+                    if failed {
+                        result(nil)
+                        return
+                    }
+                    let hex = hasher.finalize()
+                        .map { String(format: "%02x", $0) }.joined()
+                    result([
+                        "sha256": hex,
+                        "bytes": total,
+                        "uti": resource.uniformTypeIdentifier,
+                        "filename": resource.originalFilename,
+                        "resourceCount": resources.count,
+                        "resourceSummary": Self.resourceSummary(asset),
+                    ])
+                }
+            }
+        )
+    }
+}
+
+// MARK: - 导出照片
 
     private func exportPhotoAsset(call: FlutterMethodCall, result: @escaping FlutterResult) {
         guard let args = call.arguments as? [String: Any],

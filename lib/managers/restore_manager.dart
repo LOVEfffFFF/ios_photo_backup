@@ -446,13 +446,22 @@ class RestoreManager {
     }
   }
 
-  /// 校验下载回来的文件是否与电脑端清单记录的 sha256 一致
+  /// 校验下载回来的文件是否与电脑端清单记录一致
   ///
   /// [expectedPath] 是服务器上的相对路径（用它查清单）。
-  /// 清单里没有该文件的 hash 时（旧版 Backfill 数据）直接放行，不阻塞恢复。
   ///
-  /// 不一致时抛异常 —— 调用方会把它计为失败并继续下一条，
-  /// **绝不会把损坏的文件写进相册**。
+  /// **两层校验，缺一不可**：
+  ///   ①清单 [sha256]（落盘侧）→ 证明「下载回来的 == 上传时的」，传输没损坏
+  ///   ② 清单 [clientSha256]（原图侧）→ 证明「**备份内容 == 手机原图**」
+  ///
+  /// 第 ② 层才是"备份是否真的等于源文件"的答案。缺了它只能证明传输完整，
+  /// 证明不了备份的内容对不对 —— 例如导出时选错了资源，①照样通过。
+  ///
+  /// 清单里没有对应哈希时（旧版 Backfill / 旧版 App 备份）直接放行——
+  /// **校验能力缺失不等于内容有问题**，不能因此阻断恢复。
+  ///
+  /// 不一致时抛异常 —— 调用方计为失败并继续下一条，
+  /// **绝不会把内容不对的文件写进相册**。
   Future<void> _verifySha256(
     String localFilePath,
     String expectedPath,
@@ -460,8 +469,12 @@ class RestoreManager {
     String label,
   ) async {
     final expected = manifest?.sha256Of(expectedPath);
-    if (expected == null) {
-      // 没有基准可比：宁可放行，也不要因为校验能力缺失而无法恢复
+    // 原图侧哈希：证明「备份内容 == 手机原图」，这才是"是否等于源文件"的答案
+    final clientSha = manifest?.clientSha256Of(expectedPath);
+    final verifyState = manifest?.verifyStateOf(expectedPath) ?? 'unchecked';
+
+    // 没有任何基准可比：宁可放行，也不要因为校验能力缺失而无法恢复
+    if (expected == null && clientSha == null) {
       return;
     }
     final file = File(localFilePath);
@@ -472,14 +485,29 @@ class RestoreManager {
       // 流式计算，避免大视频一次性读进内存
       final digest = await sha256.bind(file.openRead()).first;
       final actual = digest.toString();
-      if (actual != expected) {
+      var bad = false;
+
+      // ① 落盘侧：传输完整性
+      if (expected != null && actual != expected) {
+        bad = true;
+      }
+      // ② 原图侧：内容是否等于源文件。三个哈希两两一致才通过：
+      //    下载文件的实际哈希 == 落盘时算的 == 原图导出时算的
+      if (clientSha != null && actual != clientSha) {
+        bad = true;
+      }
+
+      if (bad) {
         throw Exception(
-            '$label 已损坏（校验不通过）：期望 ${expected.substring(0, 12)}… '
-            '实际 ${actual.substring(0, 12)}…；已跳过，不会导入相册');
+            '$label 内容校验不通过：实际 ${actual.substring(0, 12)}… '
+            '落盘基准 ${(expected ?? '(无)').substring(0, expected == null ? 5 : 12)}… '
+            '原图基准 ${(clientSha ?? '(无)').substring(0, clientSha == null ? 5 : 12)}…'
+            '${verifyState == 'mismatch' ? '；接收端上传时已标记 mismatch' : ''}'
+            '；已跳过，不会导入相册');
       }
     } on Exception catch (e) {
       // 校验失败要明确抛出，但不能把「读文件出错」也当成损坏
-      if (e.toString().contains('已损坏')) {
+      if (e.toString().contains('内容校验不通过')) {
         rethrow;
       }
       throw Exception('$label 校验出错：$e');

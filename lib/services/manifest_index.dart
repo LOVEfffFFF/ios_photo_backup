@@ -127,8 +127,22 @@ class ManifestEntry {
 
   /// 该文件的 SHA-256（清单里没有时为空串）
   ///
-  /// 恢复时用来校验下载回来的文件是否损坏（GAP-S4）。
+  /// 两种来源，要分清：
+  ///  · [sha256]           接收端对**落盘字节**算的 → 验证"下载回来的 == 上传时的"
+  ///  · [clientSha256]     手机端对**原图资源**算的   → 验证"备份内容 == 手机原图"
+  ///
+  /// 后者才是端到端的那个「原图侧」基准，恢复时拿它比对就能证明
+  /// 「原图 → 备份 → 下载」全程字节无损，且不依赖原图现在是否还在手机上。
   final String sha256;
+
+  /// 手机端导出时算的原图字节哈希（旧版 App 备份的条目为空串）
+  final String clientSha256;
+
+  /// 端到端校验结果：verified / mismatch / unchecked
+  ///
+  /// unchecked 是「未校验」（旧版 App 没提供原图侧哈希），
+  /// 与 mismatch（校验失败）含义完全不同，不能混为一谈。
+  final String verifyState;
 
   /// true = 这条是从文件名反推的（Backfill），不是 App 上传的权威数据
   final bool inferred;
@@ -144,6 +158,8 @@ class ManifestEntry {
     this.pixelHeight,
     this.size = 0,
     this.sha256 = '',
+    this.clientSha256 = '',
+    this.verifyState = 'unchecked',
     this.inferred = false,
   });
 
@@ -160,6 +176,8 @@ class ManifestEntry {
         pixelHeight: (e['pixelHeight'] as num?)?.toInt(),
         size: (e['size'] as num?)?.toInt() ?? 0,
         sha256: (e['sha256'] as String?) ?? '',
+        clientSha256: (e['clientSha256'] as String?) ?? '',
+        verifyState: (e['verifyState'] as String?) ?? 'unchecked',
         inferred: e['inferred'] == true,
       );
 
@@ -194,6 +212,23 @@ class ManifestIndex {
   ///
   /// 建在**全部**条目上（含配对视频），因为恢复时主文件和配对视频都要校验。
   final Map<String, String> _shaByPath = <String, String>{};
+
+  /// 服务器路径 → 完整条目（恢复校验要取原图侧哈希与校验状态）
+  final Map<String, ManifestEntry> _byPath = <String, ManifestEntry>{};
+
+  /// 查某个服务器路径的**原图侧**哈希（手机端导出时算的）
+  ///
+  /// 恢复时拿它校验下载回来的文件，就能证明「原图 → 备份 → 下载」字节无损。
+  /// 返回 null = 清单里没有这个基准（旧版 App 备份的），此时无法做该校验，
+  /// 调用方应放行而不是报错 —— 校验能力缺失不等于内容有问题。
+  String? clientSha256Of(String serverPath) {
+    final v = _byPath[serverPath]?.clientSha256 ?? '';
+    return v.isEmpty ? null : v;
+  }
+
+  /// 端到端校验结果（verified / mismatch / unchecked）
+  String verifyStateOf(String serverPath) =>
+      _byPath[serverPath]?.verifyState ?? 'unchecked';
 
   /// 查某个服务器路径记录的 sha256；没有记录时返回 null
   String? sha256Of(String serverPath) {
@@ -246,6 +281,8 @@ class ManifestIndex {
 
   void _buildIndex() {
     for (final e in entries) {
+      // 全量索引：恢复校验需要按路径取到整条记录（原图侧哈希、校验状态）
+      _byPath[e.serverPath] = e;
       if (e.sha256.isNotEmpty) {
         _shaByPath[e.serverPath] = e.sha256;
       }
