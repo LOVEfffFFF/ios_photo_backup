@@ -159,14 +159,14 @@ import Network
         // contains 是集合自带的 API，不需要遍历，兼容性最好。
         var result: [String] = []
         let subtypes = asset.mediaSubtypes
-        let probes: [(Int, String)] = [
+        let probes: [(UInt, String)] = [
             (1, "实况照片"), (2, "全景"), (3, "HDR"), (4, "增益图"),
             (5, "人像深度效果"), (6, "主体识别"), (8, "RAW 原片"),
             (9, "视频流"), (10, "Live Photo 视频"), (11, "高帧率"),
             (12, "延时摄影"), (13, "电影效果"),
         ]
         for (raw, name) in probes {
-            // 用 rawValue 构造的元素来比较，避免依赖枚举成员名在不同 SDK 的差异
+            // 用 rawValue 构造的元素来比较，避免依赖枚举成员名在不同SDK 的差异
             if let subtype = PHAssetMediaSubtype(rawValue: raw),
                subtypes.contains(subtype) {
                 result.append(name)
