@@ -720,3 +720,4 @@ class SaveWithExtrasResult {
 
   bool get ok => assetId.isNotEmpty;
 
+}

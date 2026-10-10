@@ -8,6 +8,7 @@ import '../helpers/photo_library_helper.dart';
 import '../models/backup_record.dart';
 import '../services/manifest_index.dart';
 import '../services/server_client.dart';
+import '../services/log_service.dart';
 import '../services/server_config.dart';
 
 /// 单个资源的往返验证结果
