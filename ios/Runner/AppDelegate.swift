@@ -154,11 +154,14 @@ import Network
             12: "延时摄影",          // videoTimelapse
             13: "电影效果",          // videoCinematic
         ]
+        // mediaSubtypes 的元素类型不遵循 Hashable，不能用 Set/sorted，
+        // 也不保证可迭代——用 NSSet 的 allObjects 桥接成数组最稳
         var result: [String] = []
-        let subtypes: Set<PHAssetMediaSubtype> = asset.mediaSubtypes
-        for subtype in subtypes.sorted(by: { $0.rawValue < $1.rawValue }) {
-            if let name = names[subtype.rawValue] {
-                result.append(name)
+        if let arr = asset.mediaSubtypes as NSSet? {
+            for case let raw as Int in arr.allObjects {
+                if let name = names[raw] {
+                    result.append(name)
+                }
             }
         }
         return result
