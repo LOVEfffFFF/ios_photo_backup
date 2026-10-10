@@ -154,14 +154,22 @@ import Network
             12: "延时摄影",          // videoTimelapse
             13: "电影效果",          // videoCinematic
         ]
-        // mediaSubtypes 的元素类型不遵循 Hashable，不能用 Set/sorted，
-        // 也不保证可迭代——用 NSSet 的 allObjects 桥接成数组最稳
+        // PHAssetMediaSubtype 的集合在 Swift 里无法直接遍历（元素类型不遵循
+        // Hashable、也不能桥接成 NSSet）。改为逐个询问是否包含已知值——
+        // contains 是集合自带的 API，不需要遍历，兼容性最好。
         var result: [String] = []
-        if let arr = asset.mediaSubtypes as NSSet? {
-            for case let raw as Int in arr.allObjects {
-                if let name = names[raw] {
-                    result.append(name)
-                }
+        let subtypes = asset.mediaSubtypes
+        let probes: [(Int, String)] = [
+            (1, "实况照片"), (2, "全景"), (3, "HDR"), (4, "增益图"),
+            (5, "人像深度效果"), (6, "主体识别"), (8, "RAW 原片"),
+            (9, "视频流"), (10, "Live Photo 视频"), (11, "高帧率"),
+            (12, "延时摄影"), (13, "电影效果"),
+        ]
+        for (raw, name) in probes {
+            // 用 rawValue 构造的元素来比较，避免依赖枚举成员名在不同 SDK 的差异
+            if let subtype = PHAssetMediaSubtype(rawValue: raw),
+               subtypes.contains(subtype) {
+                result.append(name)
             }
         }
         return result
