@@ -215,8 +215,9 @@ class _ComparePageState extends State<ComparePage> {
         sb.writeln('  资源完整度:');
         sb.writeln('    原图资源总数: ${phone.resources.length}');
         sb.writeln('    已备份: 主文件 1 个（${rec.relativePath.split('/').last}）');
-        if (rec.livePhotoVideoRelativePath != null) {
-          sb.writeln('已备份: 配对视频 1 个（${rec.livePhotoVideoRelativePath.split('/').last}）');
+        final pairedPath = rec.livePhotoVideoRelativePath;
+        if (pairedPath != null && pairedPath.isNotEmpty) {
+          sb.writeln('    已备份: 配对视频 1 个（${pairedPath.split('/').last}）');
         }
         final auxCount = phone.resources.where((r) {
           const primaryTypes = {
