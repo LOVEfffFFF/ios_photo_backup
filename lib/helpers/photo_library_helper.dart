@@ -1,79 +1,9 @@
 import 'dart:io';
+
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 
-/// 照片库访问封装 - 通过 MethodChannel 调用原生 iOS API
-class PhotoLibraryHelper {
-  static const _channel = MethodChannel('com.photobackup/photo_library');
-
-  /// 请求照片访问权限
-  static Future<bool> requestPermission() async {
-    // iOS 使用 permission_handler 请求照片权限
-    final status = await Permission.photos.request();
-    if (status.isGranted) return true;
-
-    // 如果被拒绝，尝试有限访问
-    if (status.isLimited) return true;
-
-    return false;
-  }
-
-  /// 请求添加照片到相册的权限
-  static Future<bool> requestAddOnlyPermission() async {
-    // iOS 14+ 的添加照片权限
-    final status = await Permission.photosAddOnly.request();
-    return status.isGranted || status.isLimited;
-  }
-
-  /// 触发 iOS 本地网络访问授权（iOS 14+）
-  ///
-  /// 单纯的单播 HTTP 连接不足以让系统弹出授权窗；未授权时连接会被沙盒
-  /// 直接丢弃，表现为 `No route to host, errno = 65`。
-  /// 这里双管齐下：原生 Bonjour 浏览（主）+ Dart 侧 mDNS 探测包（兜底）。
-  static Future<void> requestLocalNetworkPermission() async {
-    try {
-      await _channel.invokeMethod('requestLocalNetworkPermission');
-    } catch (e) {
-      print('[LocalNetwork] 原生权限探测失败: $e');
-    }
-
-    RawDatagramSocket? socket;
-    try {
-      socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
-      socket.broadcastEnabled = true;
-      socket.send(const [0], InternetAddress('224.0.0.251'), 5353);
-    } catch (e) {
-      print('[LocalNetwork] 多播探测失败: $e');
-    } finally {
-      socket?.close();
-    }
-  }
-
-  /// 批量查询这些 localIdentifier 是否仍然存在于相册中
-  ///
-  /// 恢复前用它跳过「照片本来就没删」的条目 —— 否则同一台手机上恢复
-  /// 会把还在相册里的照片又导入一份，变成重复。
-  /// 返回：仍然存在于相册中的 localIdentifier 集合。
-  static Future<Set<String>> filterExistingAssets(
-    List<String> localIdentifiers,
-  ) async {
-    if (localIdentifiers.isEmpty) {
-      return <String>{};
-    }
-    try {
-      final result = await _channel.invokeMethod('checkAssetsExist', {
-        'localIdentifiers': localIdentifiers,
-      });
-      if (result is List) {
-        return result.map((e) => e.toString()).toSet();
-      }
-    } catch (e) {
-      print('[PhotoLibrary] 查询相册资产失败: $e');
-    }
-    return <String>{};
-  }
-
-  /// 单个资产的完整信息（对比「备份 vs 原图」用）
+/// 单个资产的完整信息（对比「备份 vs 原图」用）
 class AssetDetail {
   final String localIdentifier;
   final double creationDate;
@@ -193,7 +123,78 @@ class AssetResourceInfo {
   }
 }
 
-/// 取单个资产的完整信息；相册里找不到时返回 null
+/// 照片库访问封装 - 通过 MethodChannel 调用原生 iOS API
+class PhotoLibraryHelper {
+  static const _channel = MethodChannel('com.photobackup/photo_library');
+
+  /// 请求照片访问权限
+  static Future<bool> requestPermission() async {
+    // iOS 使用 permission_handler 请求照片权限
+    final status = await Permission.photos.request();
+    if (status.isGranted) return true;
+
+    // 如果被拒绝，尝试有限访问
+    if (status.isLimited) return true;
+
+    return false;
+  }
+
+  /// 请求添加照片到相册的权限
+  static Future<bool> requestAddOnlyPermission() async {
+    // iOS 14+ 的添加照片权限
+    final status = await Permission.photosAddOnly.request();
+    return status.isGranted || status.isLimited;
+  }
+
+  /// 触发 iOS 本地网络访问授权（iOS 14+）
+  ///
+  /// 单纯的单播 HTTP 连接不足以让系统弹出授权窗；未授权时连接会被沙盒
+  /// 直接丢弃，表现为 `No route to host, errno = 65`。这里双管齐下：
+  /// 原生 Bonjour 浏览（主）+ Dart 侧 mDNS 探测包（兜底）。
+  static Future<void> requestLocalNetworkPermission() async {
+    try {
+      await _channel.invokeMethod('requestLocalNetworkPermission');
+    } catch (e) {
+      print('[LocalNetwork] 原生权限探测失败: $e');
+    }
+
+    RawDatagramSocket? socket;
+    try {
+      socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+      socket.broadcastEnabled = true;
+      socket.send(const [0], InternetAddress('224.0.0.251'), 5353);
+    } catch (e) {
+      print('[LocalNetwork] 多播探测失败: $e');
+    } finally {
+      socket?.close();
+    }
+  }
+
+  /// 批量查询这些 localIdentifier 是否仍然存在于相册中
+  ///
+  /// 恢复前用它跳过「照片本来就没删」的条目 —— 否则同一台手机上恢复
+  /// 会把还在相册里的照片又导入一份，变成重复。
+  /// 返回：仍然存在于相册中的 localIdentifier 集合。
+  static Future<Set<String>> filterExistingAssets(
+    List<String> localIdentifiers,
+  ) async {
+    if (localIdentifiers.isEmpty) {
+      return <String>{};
+    }
+    try {
+      final result = await _channel.invokeMethod('checkAssetsExist', {
+        'localIdentifiers': localIdentifiers,
+      });
+      if (result is List) {
+        return result.map((e) => e.toString()).toSet();
+      }
+    } catch (e) {
+      print('[PhotoLibrary] 查询相册资产失败: $e');
+    }
+    return <String>{};
+  }
+
+  /// 取单个资产的完整信息；相册里找不到时返回 null
   static Future<AssetDetail?> fetchAssetDetail(String localIdentifier) async {
     if (localIdentifier.isEmpty) {
       return null;
