@@ -537,9 +537,13 @@ class _ResourceCard extends StatelessWidget {
             if (r.note != null)
               Padding(
                 padding: const EdgeInsets.only(top: 4),
-                child: Text(r.note!,
-                    style: const TextStyle(
-                        fontSize: 10, color: Colors.orange.shade900)),
+                // 不用 const：Colors.orange.shade900 的 shade 是运行时
+                // 计算的 getter，不是编译期常量
+                child: Text(
+                  r.note!,
+                  style:
+                      TextStyle(fontSize: 10, color: Colors.orange.shade900),
+                ),
               ),
           ],
         ),
