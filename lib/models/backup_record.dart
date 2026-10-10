@@ -27,6 +27,33 @@ class BackupRecord {
   final int? pixelWidth;
   final int? pixelHeight;
 
+  /// 原图资源的 SHA256（原生导出时顺手算的，「原图侧」的哈希）
+  ///
+  /// 与电脑端 manifest 里的 sha256（对落盘字节算的）是**两个独立来源**。
+  /// 两者一致才证明备份内容确实等于手机原图 —— 这正是 GAP-S4 要闭合的缺口。
+  /// 旧记录没有这个字段时为空，表示「未做端到端校验」而非「校验失败」。
+  final String contentSha256;
+
+  /// 原图该资产共有几个 PHAssetResource
+  final int? resourceTotal;
+
+  /// 备份了的主资源类型（照片 / 视频 / 配对视频）
+  final List<String> resourcePrimary;
+
+  /// 原图里存在但未备份的辅助资源类型
+  /// （ProRAW 的第二份、深度图、HDR 增益图、海报…）
+  final List<String> resourceAuxiliary;
+
+  /// 资源完整度：备份了 1（主文件）+ N（辅助）。
+  /// 原图资源数大于这个值，说明有资源没被导出（GAP-R1 的暴露方式）。
+  int get backedResourceCount => 1 + resourceAuxiliary.length;
+
+  /// 资源是否完整导出。旧记录没有 resourceTotal 时返回 null（无法判断）。
+  bool? get isResourceComplete {
+    if (resourceTotal == null || resourceTotal == 0) return null;
+    return backedResourceCount >= resourceTotal!;
+  }
+
   /// 如果是 Live Photo，记录配对视频的相对路径
   final String? livePhotoVideoRelativePath;
 
@@ -38,6 +65,10 @@ class BackupRecord {
     this.livePhotoVideoRelativePath,
     this.pixelWidth,
     this.pixelHeight,
+    this.contentSha256 = '',
+    this.resourceTotal,
+    this.resourcePrimary = const [],
+    this.resourceAuxiliary = const [],
     double? creationTimestamp,
   }) : creationTimestamp =
             creationTimestamp ?? creationDate.millisecondsSinceEpoch / 1000.0;
@@ -56,6 +87,12 @@ class BackupRecord {
           creationDate.millisecondsSinceEpoch / 1000.0,
       pixelWidth: (json['pixelWidth'] as num?)?.toInt(),
       pixelHeight: (json['pixelHeight'] as num?)?.toInt(),
+      contentSha256: json['contentSha256'] as String? ?? '',
+      resourceTotal: (json['resourceTotal'] as num?)?.toInt(),
+      resourcePrimary: ((json['resourcePrimary'] as List?) ?? const [])
+          .map((e) => '$e').toList(),
+      resourceAuxiliary: ((json['resourceAuxiliary'] as List?) ?? const [])
+          .map((e) => '$e').toList(),
     );
   }
 
@@ -70,6 +107,10 @@ class BackupRecord {
       'livePhotoVideoRelativePath': livePhotoVideoRelativePath,
       'pixelWidth': pixelWidth,
       'pixelHeight': pixelHeight,
+      'contentSha256': contentSha256,
+      'resourceTotal': resourceTotal,
+      'resourcePrimary': resourcePrimary,
+      'resourceAuxiliary': resourceAuxiliary,
     };
   }
 }

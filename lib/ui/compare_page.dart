@@ -117,12 +117,19 @@ class _ComparePageState extends State<ComparePage> {
     sb.writeln('--- 备份记录总览（共 ${_records.length} 条）---');
     if (_records.isNotEmpty) {
       final byType = <String, int>{};
-      var live = 0, withPrints = 0;
+      var live = 0, withPrints = 0, withHash = 0, complete = 0, unverifiable = 0;
       var minT = double.infinity, maxT = 0.0;
       for (final r in _records) {
         byType[r.mediaType] = (byType[r.mediaType] ?? 0) + 1;
         if (r.mediaType == 'live_photo') live++;
         if (r.pixelWidth != null) withPrints++;
+        if (r.contentSha256.isNotEmpty) withHash++;
+        final ok = r.isResourceComplete;
+        if (ok == null) {
+          unverifiable++;
+        } else if (ok) {
+          complete++;
+        }
         if (r.creationTimestamp < minT) minT = r.creationTimestamp;
         if (r.creationTimestamp > maxT) maxT = r.creationTimestamp;
       }
@@ -130,6 +137,13 @@ class _ComparePageState extends State<ComparePage> {
       sb.writeln('  实况照片: $live 条');
       sb.writeln('  含像素宽高: $withPrints / ${_records.length}'
           '${withPrints == 0 ? '  ← 旧版 App 写的记录，指纹会退化' : ''}');
+      sb.writeln('  含原图哈希(可端到端校验): $withHash / ${_records.length}');
+      if (unverifiable > 0) {
+        sb.writeln('  资源完整度: $complete 条完整'
+            '${unverifiable > 0 ? '、$unverifiable 条无法判断（缺 resourceTotal）' : ''}');
+      } else {
+        sb.writeln('  资源完整度: $complete / ${_records.length} 完整');
+      }
       if (minT.isFinite) {
         sb.writeln('  时间跨度: ${_fmtTime(minT)} ~ ${_fmtTime(maxT)}');
       }
@@ -192,6 +206,39 @@ class _ComparePageState extends State<ComparePage> {
         for (final res in phone.resources) {
           sb.writeln('    - [${res.typeLabel}] ${res.originalFilename}');
           sb.writeln('      UTI: ${res.uti}');
+        }
+
+        // 资源完整度：备份侧只导出了主文件，原图的辅助资源（ProRAW 第二份、
+        // 深度图、增益图）并没有被导出 —— 这正是 GAP-R1 的暴露方式，
+        // 以前报告里看不到，现在明确列出。
+        sb.writeln('');
+        sb.writeln('  资源完整度:');
+        sb.writeln('    原图资源总数: ${phone.resources.length}');
+        sb.writeln('    已备份: 主文件 1 个（${rec.relativePath.split('/').last}）');
+        if (rec.livePhotoVideoRelativePath != null) {
+          sb.writeln('已备份: 配对视频 1 个（${rec.livePhotoVideoRelativePath.split('/').last}）');
+        }
+        final auxCount = phone.resources.where((r) {
+          const primaryTypes = {
+            'photo', 'video', 'pairedVideo',
+            'fullSizePhoto', 'fullSizeVideo', 'fullSizePairedVideo',
+          };
+          return !primaryTypes.contains(r.typeLabel);
+        }).length;
+        if (auxCount > 0) {
+          final auxNames = phone.resources
+              .where((r) => const {
+                    'photo', 'video', 'pairedVideo',
+                    'fullSizePhoto', 'fullSizeVideo', 'fullSizePairedVideo',
+                  }.contains(r.typeLabel) == false)
+              .map((r) => r.typeLabel)
+              .toList();
+          sb.writeln('    未备份: $auxCount 个辅助资源（${auxNames.join(', ')}）');
+          sb.writeln('    → 判定: **不完整** —— 原图比备份多出这些资源，'
+              '恢复后会丢失对应信息（深度/动态范围/第二份格式）');
+        } else {
+          sb.writeln('    未备份: 无');
+          sb.writeln('    → 判定: 完整');
         }
 
         // 一致性判定：哪些字段对不上

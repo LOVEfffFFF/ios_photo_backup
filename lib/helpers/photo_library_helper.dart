@@ -231,7 +231,81 @@ class PhotoLibraryHelper {
     });
   }
 
-  /// 获取所有照片资源信息（通过原生通道）
+  /// 导出结果：文件路径 + 内容哈希 + 资源构成
+///
+/// 这是**端到端校验**的基础：[sha256] 是原生侧在把资源写盘时**顺手**算出的
+/// 「原图字节哈希」，与接收端对落盘字节算出的哈希是两个独立来源。
+/// 两者一致才能证明「从原图到磁盘」没出错——只靠接收端自己算的哈希不行，
+/// 那样只能证明传输没损坏，证明不了导出内容就是原图。
+class ExportResult {
+  const ExportResult({
+    required this.path,
+    required this.sha256,
+    required this.bytes,
+    required this.resourceTotal,
+    required this.resourcePrimary,
+    required this.resourceAuxiliary,
+  });
+
+  final String path;
+
+  /// 原图资源的 SHA256（空串 = 原生没给，做不了端到端校验）
+  final String sha256;
+  final int bytes;
+
+  /// 原图该资产共有几个 PHAssetResource
+  final int resourceTotal;
+
+  /// 备份了的主资源类型（照片/视频/配对视频…）
+  final List<String> resourcePrimary;
+
+  /// 原图里存在但**没有备份**的辅助资源类型
+  /// （ProRAW 的第二份、深度图、HDR 增益图、海报…）
+  final List<String> resourceAuxiliary;
+
+  /// 资源完整度：备份了几个 / 原图共几个
+  ///
+  /// > 1 说明原图有多个资源而我们只导出了一个 —— 这就是 GAP-R1 的暴露方式。
+  int get backedResourceCount => 1 + resourceAuxiliary.length;
+
+  bool get isComplete => resourceTotal > 0 && backedResourceCount >= resourceTotal;
+
+  /// 从原生返回的 Map 解析。兼容旧版只返回路径字符串的情况。
+  static ExportResult? fromChannel(Object? raw, String? fallbackPath) {
+    if (raw is String) {
+      // 旧版原生：只返回路径，没有哈希也没有资源信息
+      return ExportResult(
+        path: raw.isNotEmpty ? raw : (fallbackPath ?? ''),
+        sha256: '',
+        bytes: 0,
+        resourceTotal: 0,
+        resourcePrimary: const [],
+        resourceAuxiliary: const [],
+      );
+    }
+    if (raw is! Map) return null;
+    final path = (raw['path'] as String?) ?? fallbackPath ?? '';
+    if (path.isEmpty) return null;
+
+    List<String> splitList(Object? v) {
+      if (v is List) return v.map((e) => '$e').toList();
+      // 原生用 '|' 传列表（HTTP header 里逗号会被当分隔符）
+      if (v is String && v.isNotEmpty) return v.split('|');
+      return const [];
+    }
+
+    return ExportResult(
+      path: path,
+      sha256: (raw['sha256'] as String?) ?? '',
+      bytes: (raw['bytes'] as num?)?.toInt() ?? 0,
+      resourceTotal: (raw['total'] as num?)?.toInt() ?? 0,
+      resourcePrimary: splitList(raw['primary']),
+      resourceAuxiliary: splitList(raw['auxiliary']),
+    );
+  }
+}
+
+/// 获取照片资源信息（通过原生通道）
   /// 返回 List<Map>，包含 localIdentifier, creationDate, mediaType, isLivePhoto
   static Future<List<Map<String, dynamic>>> fetchAllAssets() async {
     try {
@@ -254,7 +328,7 @@ class PhotoLibraryHelper {
   /// [isNetworkAccessAllowed] 是否允许下载 iCloud 原片
   ///
   /// 返回实际写入的文件路径（原生按资源真实类型推导扩展名），失败返回 null
-  static Future<String?> exportPhotoAsset({
+  static Future<ExportResult?> exportPhotoAsset({
     required String localIdentifier,
     required String targetPath,
     bool isNetworkAccessAllowed = true,
@@ -265,17 +339,14 @@ class PhotoLibraryHelper {
         'targetPath': targetPath,
         'isNetworkAccessAllowed': isNetworkAccessAllowed,
       });
-      if (result is String) {
-        return result;
-      }
-      return null;
+      return ExportResult.fromChannel(result, targetPath);
     } catch (e) {
       return null;
     }
   }
 
   /// 导出视频资源到文件
-  static Future<bool> exportVideoAsset({
+  static Future<ExportResult?> exportVideoAsset({
     required String localIdentifier,
     required String targetPath,
     bool isNetworkAccessAllowed = true,
@@ -286,14 +357,14 @@ class PhotoLibraryHelper {
         'targetPath': targetPath,
         'isNetworkAccessAllowed': isNetworkAccessAllowed,
       });
-      return result == true;
+      return ExportResult.fromChannel(result, targetPath);
     } catch (e) {
-      return false;
+      return null;
     }
   }
 
   /// 导出 Live Photo 的配对视频
-  static Future<bool> exportLivePhotoVideo({
+  static Future<ExportResult?> exportLivePhotoVideo({
     required String localIdentifier,
     required String targetPath,
   }) async {
@@ -302,9 +373,9 @@ class PhotoLibraryHelper {
         'localIdentifier': localIdentifier,
         'targetPath': targetPath,
       });
-      return result == true;
+      return ExportResult.fromChannel(result, targetPath);
     } catch (e) {
-      return false;
+      return null;
     }
   }
 

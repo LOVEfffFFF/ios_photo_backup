@@ -4,6 +4,7 @@ import Photos
 import UniformTypeIdentifiers
 import Network
 import ObjectiveC
+import CryptoKit
 
 // MARK: - 崩溃捕获的底层工具（顶层函数）
 //
@@ -493,6 +494,136 @@ private func photoBackupSignalHandler(_ sig: Int32) {
         }
     }
 
+    // MARK: - 资源导出与端到端校验
+
+    /// PHAssetResourceType → 可读名称（与 Dart 侧 AssetResourceInfo.typeLabel 保持一致）
+    private static func resourceTypeName(_ t: PHAssetResourceType) -> String {
+        switch t {
+        case .photo: return "photo"
+        case .video: return "video"
+        case .pairedVideo: return "pairedVideo"
+        case .fullSizePhoto: return "fullSizePhoto"
+        case .fullSizeVideo: return "fullSizeVideo"
+        case .fullSizePairedVideo: return "fullSizePairedVideo"
+        case .poster: return "poster"
+        case .alternatePhoto: return "alternatePhoto"
+        case .alternateVideo: return "alternateVideo"
+        case .alternatePairedVideo: return "alternatePairedVideo"
+        case .fullSizePoster: return "fullSizePoster"
+        default: return "type(\(t.rawValue))"
+        }
+    }
+
+    /// 导出单个资源：边接收边写盘边算 SHA256
+    ///
+    /// ## 为什么不用 writeData(for:toFile:)
+    /// 它不给流式回调，无法在写盘的同时算哈希，只能事后再把文件读一遍
+    /// （一张 59MB 的 DNG 就多读一次）。`requestData` 的 dataReceivedHandler
+    /// 是分块给的，可以边收边更新哈希 —— **零额外 IO**。
+    ///
+    /// ## 这个 hash 有什么用
+    /// 它是「手机原图资源」的哈希，与接收端对**落盘字节**算出的哈希是
+    /// 两个**独立来源**。两者一致才能证明：从原图到磁盘这条链路没出错。
+    /// 接收端自己算的哈希只能证明传输没损坏，证明不了「导出的内容就是原图」。
+    private func exportResource(
+        _ resource: PHAssetResource,
+        to targetURL: URL,
+        options: PHAssetResourceRequestOptions,
+        completion: @escaping (Result<(sha256: String, bytes: Int), Error>) -> Void
+    ) {
+        let directory = targetURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true, attributes: nil)
+        try? FileManager.default.removeItem(at: targetURL)
+
+        guard FileManager.default.createFile(atPath: targetURL.path, contents: nil),
+              let handle = FileHandle(forWritingAtPath: targetURL.path) else {
+            completion(.failure(NSError(
+                domain: "PhotoBackup", code: 1,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "无法创建文件 \(targetURL.lastPathComponent)"])))
+            return
+        }
+
+        var hasher = SHA256()
+        var total = 0
+        PHAssetResourceManager.default().requestData(
+            for: resource,
+            dataReceivedHandler: { data in
+                hasher.update(data: data)
+                handle.write(data)
+                total += data.count
+            },
+            completionHandler: { error in
+                handle.closeFile()
+                if let error = error {
+                    // 半截文件留在沙盒里会被下次上传当成正常文件，先清掉
+                    try? FileManager.default.removeItem(at: targetURL)
+                    completion(.failure(error))
+                    return
+                }
+                let hex = hasher.finalize()
+                    .map { String(format: "%02x", $0) }.joined()
+                completion(.success((sha256: hex, bytes: total)))
+            }
+        )
+    }
+
+    /// 统计一个资产的全部资源构成（用于「资源完整度」核对）
+    ///
+    /// 只取类型与文件名，不读内容，因此很快，可以每次备份都算。
+    private static func resourceSummary(_ asset: PHAsset) -> [String: Any] {
+        let resources = PHAssetResource.assetResources(for: asset)
+        var primaryTypes: [String] = []
+        var auxiliaryTypes: [String] = []
+        for r in resources {
+            let label = resourceTypeName(r.type)
+            switch r.type {
+            case .photo, .video, .pairedVideo, .fullSizePhoto, .fullSizeVideo:
+                primaryTypes.append(label)
+            default:
+                // 深度图 / 增益图 / 海报等：这些是「多出来的资源」，
+                // ProRAW 的 DNG+JPEG 也落在这里 —— 少导了就是丢内容
+                auxiliaryTypes.append(label)
+            }
+        }
+        return [
+            "total": resources.count,
+            "primary": primaryTypes,
+            "auxiliary": auxiliaryTypes,
+        ]
+    }
+
+    /// 计算已落盘文件的 SHA256（分块读，不把大文件整个塞进内存）
+    ///
+    /// 用于「系统导出」的路径：AVAssetExportSession 自己写文件，不给流式回调，
+    /// 只能在导出完成后读回来算。这是权衡后的取舍 —— 视频走的是系统转封装，
+    /// 想边写边算就得自己重写封装逻辑，代价远大于多读一次。
+    private func sha256OfFile(at path: String) -> String? {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { handle.closeFile() }
+        var hasher = SHA256()
+        while true {
+            let chunk = handle.readData(ofLength: 1 << 20)  // 1MB 一块
+            if chunk.isEmpty { break }
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// 组装导出结果（路径 + 内容哈希 + 资源构成），返回给 Dart
+    private func exportResult(
+        path: String, sha256: String, bytes: Int, summary: [String: Any]
+    ) -> [String: Any] {
+        var out: [String: Any] = [
+            "path": path,
+            "sha256": sha256,
+            "bytes": bytes,
+        ]
+        for (k, v) in summary { out[k] = v }
+        return out
+    }
+
     // MARK: - 导出照片
 
     private func exportPhotoAsset(call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -531,32 +662,26 @@ private func photoBackupSignalHandler(_ sig: Int32) {
             .deletingPathExtension()
             .appendingPathExtension(ext)
 
-        let directory = targetURL.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(
-            at: directory,
-            withIntermediateDirectories: true,
-            attributes: nil
-        )
-        try? FileManager.default.removeItem(at: targetURL)
-
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = isNetworkAccessAllowed
+        let summary = Self.resourceSummary(asset)
 
         // 回调可能触发多次，且必须切回主线程才能安全调用 FlutterResult
         var responded = false
-        PHAssetResourceManager.default().writeData(
-            for: resource,
-            toFile: targetURL,
-            options: options
-        ) { error in
+        exportResource(resource, to: targetURL, options: options) { outcome in
             DispatchQueue.main.async {
                 guard !responded else { return }
                 responded = true
-                if let error = error {
+                switch outcome {
+                case .success(let info):
+                    result(self.exportResult(
+                        path: targetURL.path,
+                        sha256: info.sha256,
+                        bytes: info.bytes,
+                        summary: summary))
+                case .failure(let error):
                     print("PhotoBackup: Failed to write photo: \(error)")
                     result(false)
-                } else {
-                    result(targetURL.path)
                 }
             }
         }
@@ -613,16 +738,26 @@ private func photoBackupSignalHandler(_ sig: Int32) {
             session.outputFileType = .mov
 
             session.exportAsynchronously {
-                DispatchQueue.main.async {
-                    switch session.status {
-                    case .completed:
-                        result(true)
-                    case .failed, .cancelled:
-                        print("PhotoBackup: Video export failed: \(session.error?.localizedDescription ?? "unknown")")
-                        result(false)
-                    default:
-                        result(false)
+                switch session.status {
+                case .completed:
+                    // 系统导出拿不到流式回调，只能导出后读回来算 hash
+                    let hash = self.sha256OfFile(at: targetURL.path) ?? ""
+                    let attrs = try? FileManager.default
+                        .attributesOfItem(atPath: targetURL.path)
+                    let bytes = (attrs?[.size] as? NSNumber)?.intValue ?? 0
+                    let summary = Self.resourceSummary(asset)
+                    DispatchQueue.main.async {
+                        result(self.exportResult(
+                            path: targetURL.path,
+                            sha256: hash,
+                            bytes: bytes,
+                            summary: summary))
                     }
+                case .failed, .cancelled:
+                    print("PhotoBackup: Video export failed: \(session.error?.localizedDescription ?? "unknown")")
+                    DispatchQueue.main.async { result(false) }
+                default:
+                    DispatchQueue.main.async { result(false) }
                 }
             }
         }
@@ -655,29 +790,27 @@ private func photoBackupSignalHandler(_ sig: Int32) {
         }
 
         let targetURL = URL(fileURLWithPath: targetPath)
-        let directory = targetURL.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(
-            at: directory,
-            withIntermediateDirectories: true,
-            attributes: nil
-        )
-
-        try? FileManager.default.removeItem(at: targetURL)
-
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = true
+        // 资源构成只对主照片有意义（配对视频本身就是 asset 的一个资源），
+        // 这里仍然附上，好让接收端知道这个文件的来源
+        let summary = Self.resourceSummary(asset)
 
-        PHAssetResourceManager.default().writeData(
-            for: videoResource,
-            toFile: targetURL,
-            options: options
-        ) { error in
+        var responded = false
+        exportResource(videoResource, to: targetURL, options: options) { outcome in
             DispatchQueue.main.async {
-                if let error = error {
+                guard !responded else { return }
+                responded = true
+                switch outcome {
+                case .success(let info):
+                    result(self.exportResult(
+                        path: targetURL.path,
+                        sha256: info.sha256,
+                        bytes: info.bytes,
+                        summary: summary))
+                case .failure(let error):
                     print("PhotoBackup: Live Photo video export failed: \(error)")
                     result(false)
-                } else {
-                    result(true)
                 }
             }
         }

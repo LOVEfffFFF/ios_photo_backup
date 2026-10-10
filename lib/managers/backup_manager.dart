@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 import '../helpers/file_helper.dart';
 import '../helpers/photo_library_helper.dart';
 import '../models/backup_record.dart';
+import '../services/log_service.dart';
 import '../services/manifest_index.dart';
 import '../services/server_client.dart';
 import '../services/server_config.dart';
@@ -422,13 +423,14 @@ class BackupManager {
         FileHelper.generateFileName(creationDate, localIdentifier, 'jpg');
     final tempPath = p.join(tempDir.path, placeholder);
 
-    final actualPath = await PhotoLibraryHelper.exportPhotoAsset(
+    final exportResult = await PhotoLibraryHelper.exportPhotoAsset(
       localIdentifier: localIdentifier,
       targetPath: tempPath,
     );
-    if (actualPath == null) {
+    if (exportResult == null) {
       throw Exception('照片导出失败');
     }
+    final actualPath = exportResult.path;
 
     final photoFile = File(actualPath);
     if (!await photoFile.exists()) {
@@ -452,9 +454,27 @@ class BackupManager {
         creationTimestamp: creationTimestamp,
         pixelWidth: pixelWidth,
         pixelHeight: pixelHeight,
+        // 端到端校验：把「原图侧」的哈希与资源构成一起发上去。
+        // 接收端会拿它与落盘字节的哈希比对，这是唯一能证明
+        // 「备份内容 == 手机原图」的检查。
+        contentSha256: exportResult.sha256,
+        resourceTotal: exportResult.resourceTotal,
+        resourcePrimary: exportResult.resourcePrimary,
+        resourceAuxiliary: exportResult.resourceAuxiliary,
       );
       if (!result.success) {
         throw Exception(result.message ?? '上传失败');
+      }
+
+      // 资源完整度告警：原图有多个资源而我们只导出了一个（ProRAW 双份、
+      // 深度图、增益图…）。这不是错误，但必须让用户知道备份不完整。
+      if (!exportResult.isComplete) {
+        LogService.instance.write(
+          LogLevel.warn,
+          'backup',
+          '资源不完整：${p.basename(actualPath)} 原图共 ${exportResult.resourceTotal} 个资源，'
+          '已备份主文件 1 个，未备份 ${exportResult.resourceAuxiliary.join(', ')}',
+        );
       }
     } finally {
       // 无论成功失败都删除暂存文件，手机不长期占用空间
@@ -472,12 +492,12 @@ class BackupManager {
       );
       final videoTempPath = p.join(tempDir.path, videoPlaceholder);
 
-      final exported = await PhotoLibraryHelper.exportLivePhotoVideo(
-        localIdentifier: localIdentifier,
-        targetPath: videoTempPath,
-      );
+      final videoExport = await PhotoLibraryHelper.exportLivePhotoVideo(
+            localIdentifier: localIdentifier,
+            targetPath: videoTempPath,
+          );
 
-      if (exported) {
+          if (videoExport != null) {
         final videoFile = File(videoTempPath);
         if (await videoFile.exists()) {
           videoServerPath = FileHelper.buildServerPath(
@@ -494,10 +514,14 @@ class BackupManager {
               mediaType: 'video',
               creationTimestamp: creationTimestamp,
               // 配对视频沿用照片的宽高：它与照片是同一个资产、同一尺寸，
-              // 指纹必须与主文件一致，否则会被当成两个不同资产
-              pixelWidth: pixelWidth,
-              pixelHeight: pixelHeight,
-            );
+                      // 指纹必须与主文件一致，否则会被当成两个不同资产
+                      pixelWidth: pixelWidth,
+                      pixelHeight: pixelHeight,
+                      contentSha256: videoExport.sha256,
+                      resourceTotal: videoExport.resourceTotal,
+                      resourcePrimary: videoExport.resourcePrimary,
+                      resourceAuxiliary: videoExport.resourceAuxiliary,
+                    );
             if (videoResult.success) {
               videoBytes = await videoFile.length();
             } else {
@@ -524,6 +548,10 @@ class BackupManager {
         livePhotoVideoRelativePath: videoServerPath,
         pixelWidth: pixelWidth,
         pixelHeight: pixelHeight,
+        contentSha256: exportResult.sha256,
+        resourceTotal: exportResult.resourceTotal,
+        resourcePrimary: exportResult.resourcePrimary,
+        resourceAuxiliary: exportResult.resourceAuxiliary,
       ),
     );
 
@@ -545,11 +573,11 @@ class BackupManager {
         FileHelper.generateFileName(creationDate, localIdentifier, 'mov');
     final tempPath = p.join(tempDir.path, fileName);
 
-    final exported = await PhotoLibraryHelper.exportVideoAsset(
+    final exportResult = await PhotoLibraryHelper.exportVideoAsset(
       localIdentifier: localIdentifier,
       targetPath: tempPath,
     );
-    if (!exported) {
+    if (exportResult == null) {
       throw Exception('视频导出失败');
     }
 
@@ -572,6 +600,10 @@ class BackupManager {
         creationTimestamp: creationTimestamp,
         pixelWidth: pixelWidth,
         pixelHeight: pixelHeight,
+        contentSha256: exportResult.sha256,
+        resourceTotal: exportResult.resourceTotal,
+        resourcePrimary: exportResult.resourcePrimary,
+        resourceAuxiliary: exportResult.resourceAuxiliary,
       );
       if (!result.success) {
         throw Exception(result.message ?? '上传失败');
@@ -589,6 +621,10 @@ class BackupManager {
         mediaType: 'video',
         pixelWidth: pixelWidth,
         pixelHeight: pixelHeight,
+        contentSha256: exportResult.sha256,
+        resourceTotal: exportResult.resourceTotal,
+        resourcePrimary: exportResult.resourcePrimary,
+        resourceAuxiliary: exportResult.resourceAuxiliary,
       ),
     );
 

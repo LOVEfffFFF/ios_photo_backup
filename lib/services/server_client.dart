@@ -95,6 +95,10 @@ class ServerClient {
     String? pairKey,
     int? pixelWidth,
     int? pixelHeight,
+    String? contentSha256,
+    int? resourceTotal,
+    List<String>? resourcePrimary,
+    List<String>? resourceAuxiliary,
   }) async {
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 15);
@@ -120,6 +124,20 @@ class ServerClient {
       }
       if (pixelHeight != null && pixelHeight > 0) {
         request.headers.set('X-Pixel-Height', '$pixelHeight');
+      }
+      // 端到端校验与资源完整度（缺省不发，旧版接收端会忽略未知头）
+      if (contentSha256 != null && contentSha256.isNotEmpty) {
+        request.headers.set('X-Content-Sha256', contentSha256);
+      }
+      if (resourceTotal != null && resourceTotal > 0) {
+        request.headers.set('X-Resource-Total', '$resourceTotal');
+      }
+      if (resourcePrimary != null && resourcePrimary.isNotEmpty) {
+        // 用 '|' 而不是 ','：HTTP 头里逗号是标准分隔符，会被服务端拆开
+        request.headers.set('X-Resource-Primary', resourcePrimary.join('|'));
+      }
+      if (resourceAuxiliary != null && resourceAuxiliary.isNotEmpty) {
+        request.headers.set('X-Resource-Auxiliary', resourceAuxiliary.join('|'));
       }
       request.headers.contentType = ContentType.binary;
       final length = await file.length();

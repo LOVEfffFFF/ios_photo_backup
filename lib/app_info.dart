@@ -14,7 +14,7 @@ class AppInfo {
   static const String version = '1.1.0';
 
   /// 构建标识：编译时间（同一个版本多次编译时用它区分）
-  static const String build = '2026-10-10-05:35';
+  static const String build = '2026-10-10-06:10';
 
   /// 对应的 git 提交短 hash
   ///
