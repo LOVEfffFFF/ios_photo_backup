@@ -548,12 +548,12 @@ private func photoBackupSignalHandler(_ sig: Int32) {
         var total = 0
         PHAssetResourceManager.default().requestData(
             for: resource,
+            options: options,
             dataReceivedHandler: { data in
                 hasher.update(data: data)
                 handle.write(data)
                 total += data.count
             },
-            options: options,
             completionHandler: { error in
                 handle.closeFile()
                 if let error = error {
