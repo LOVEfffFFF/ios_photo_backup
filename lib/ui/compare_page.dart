@@ -177,6 +177,13 @@ class _ComparePageState extends State<ComparePage> {
           '  (亚秒 ${rec.creationTimestamp.toStringAsFixed(6)})');
       sb.writeln('  媒体类型: ${rec.mediaType}');
       sb.writeln('  像素宽高: ${rec.pixelWidth}x${rec.pixelHeight}');
+      if (rec.extraResources.isNotEmpty) {
+        sb.writeln('  附加资源（${rec.extraResources.length} 个）:');
+        for (final e in rec.extraResources) {
+          sb.writeln('    - ${e.role}: ${e.relativePath}');
+          sb.writeln('      UTI: ${e.uti}  原始名: ${e.filename}  ${e.bytes} 字节');
+        }
+      }
       if (rec.livePhotoVideoRelativePath != null) {
         sb.writeln('  配对视频: ${rec.livePhotoVideoRelativePath}');
       }
@@ -204,13 +211,21 @@ class _ComparePageState extends State<ComparePage> {
         sb.writeln('');
         sb.writeln('  资源构成（${phone.resources.length} 个文件）:');
         for (final res in phone.resources) {
-          sb.writeln('    - [${res.typeLabel}] ${res.originalFilename}');
+          // type 原始值必须打出来：不同 iOS 版本上 ProRAW 的槽位归属会变，
+          // 光看 typeLabel 是映射表猜的，rawValue 才是系统真实返回的
+          sb.writeln('    - [${res.typeLabel}/type${res.type}]'
+              ' ${res.originalFilename}  ${res.fileSize} 字节');
           sb.writeln('      UTI: ${res.uti}');
         }
 
-        // 资源完整度：备份侧只导出了主文件，原图的辅助资源（ProRAW 第二份、
-        // 深度图、增益图）并没有被导出 —— 这正是 GAP-R1 的暴露方式，
-        // 以前报告里看不到，现在明确列出。
+        // 资源完整度：**按实际备份了什么**与**原图有什么**对照，
+        // 而不是按槽位标签猜。
+        //
+        // 旧逻辑只看原图里有几个「非主槽位标签」的资源就报「未备份」，
+        // 完无视备份记录里已经躺着的 extraResources。
+        // 后果很严重：一张 4 资源全备份完的 ProRAW，报告照样写
+        // 「未备份 2 个辅助资源 → 判定：不完整」，把好消息报成坏消息，
+        // 久而久之就没人信这份报告了。
         sb.writeln('');
         sb.writeln('  资源完整度:');
         sb.writeln('    原图资源总数: ${phone.resources.length}');
@@ -219,27 +234,31 @@ class _ComparePageState extends State<ComparePage> {
         if (pairedPath != null && pairedPath.isNotEmpty) {
           sb.writeln('    已备份: 配对视频 1 个（${pairedPath.split('/').last}）');
         }
-        final auxCount = phone.resources.where((r) {
-          const primaryTypes = {
-            'photo', 'video', 'pairedVideo',
-            'fullSizePhoto', 'fullSizeVideo', 'fullSizePairedVideo',
-          };
-          return !primaryTypes.contains(r.typeLabel);
-        }).length;
-        if (auxCount > 0) {
-          final auxNames = phone.resources
-              .where((r) => const {
-                    'photo', 'video', 'pairedVideo',
-                    'fullSizePhoto', 'fullSizeVideo', 'fullSizePairedVideo',
-                  }.contains(r.typeLabel) == false)
-              .map((r) => r.typeLabel)
-              .toList();
-          sb.writeln('    未备份: $auxCount 个辅助资源（${auxNames.join(', ')}）');
-          sb.writeln('    → 判定: **不完整** —— 原图比备份多出这些资源，'
-              '恢复后会丢失对应信息（深度/动态范围/第二份格式）');
+        for (final e in rec.extraResources) {
+          final fn = e.relativePath.split('/').last;
+          sb.writeln('    已备份: 附加资源(${e.role}) 1 个（$fn，${e.bytes} 字节）');
+        }
+        final backedCount = rec.backedResourceCount;
+        sb.writeln('    已备份合计: $backedCount 个');
+
+        // 「原图资源总数」优先用备份当时手机端记下的 resourceTotal——
+        // 它是同一时刻的快照；实时查询的结果会受「手机端文件已被改动」影响。
+        final recordedTotal = rec.resourceTotal;
+        if (recordedTotal != null && recordedTotal != phone.resources.length) {
+          sb.writeln('    备注: 备份时记录的原图资源数为 $recordedTotal，'
+              '当前查询为 ${phone.resources.length}（手机端资源在备份后发生过变化）');
+        }
+        final totalCount = recordedTotal ?? phone.resources.length;
+
+        if (backedCount >= totalCount) {
+          sb.writeln('    → 判定: 完整（已备份 $backedCount / 原图 $totalCount）');
         } else {
-          sb.writeln('    未备份: 无');
-          sb.writeln('    → 判定: 完整');
+          final missing = totalCount - backedCount;
+          final labels = phone.resources.map((r) => r.typeLabel).toSet().join(', ');
+          sb.writeln('    原图多出: $missing 个（$labels）');
+          sb.writeln('    → 判定: **不完整** —— 原图 $totalCount 个资源，'
+              '实际备份 $backedCount 个，差 $missing 个');
+          sb.writeln('    → 恢复后会丢失对应信息（深度/动态范围/第二份格式）');
         }
 
         // 一致性判定：哪些字段对不上

@@ -62,6 +62,19 @@ class BackupResource {
   /// 我们刻意**按 UTI 判断而不是记 type 数字**：PHAssetResourceType 在不同
   /// iOS 版本上成员有增减（实测 poster / type16 就不在公开枚举里），
   /// 而 UTI 是稳定的。写入时按下面的映射挑一个「语义正确」的 type。
+  ///
+  /// ## 为什么 raw 不再映射成 alternatePhoto
+  ///
+  /// 旧映射把 `raw` / `adjustment` / `adjustmentAAE` 全映射到
+  /// `alternatePhoto` —— 三个语义完全不同的资源挤进同一个槽位，
+  /// iOS 只能收下一个，其余静默失败。一张带风格的 ProRAW 必然在
+  /// 「RAW 原图」和「编辑指令」之间二选一。
+  ///
+  /// 现在：RAW 用 `.fullSizePhoto`（该资产的完整尺寸版本，语义最贴近原图本体），
+  /// `.alternatePhoto` 只留给编辑指令，冲突消失。
+  ///
+  /// 注：2026-10-18 起新备份的 ProRAW 走的是「DNG 当主文件」的路，
+  /// 根本不会进 extraResources；本分支是**旧记录的兜底**。
   String get restoreType {
     switch (role) {
       case 'adjustmentAAE':
@@ -71,7 +84,7 @@ class BackupResource {
       case 'pairedVideo':
         return 'pairedVideo';
       case 'raw':
-        return 'alternatePhoto';
+        return 'fullSizePhoto';
       default:
         return 'alternate';
     }

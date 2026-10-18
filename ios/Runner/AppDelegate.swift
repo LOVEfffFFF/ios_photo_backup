@@ -644,10 +644,7 @@ private func photoBackupSignalHandler(_ sig: Int32) {
         if uti.contains("property-list") { return "adjustment" }
 
         // RAW 原图
-        if uti.contains("raw-image") || uti.contains("dng")
-            || uti.contains("adobe.raw") || uti.contains("x-adobe") {
-            return "raw"
-        }
+        if isRawUTI(uti) { return "raw" }
 
         switch r.type {
         case .pairedVideo, .fullSizePairedVideo:
@@ -667,23 +664,109 @@ private func photoBackupSignalHandler(_ sig: Int32) {
         }
     }
 
-    /// 选出「主演示文件」—— 用户在相册里看到的那一份。
+    /// UTI 是否是 RAW 原图。
     ///
-    /// 这与「RAW 原图」是**两件事**：编辑过的照片，主文件是渲染后的 JPEG，
-    /// 而 RAW 原图作为附加资源一起备份（GAP-R1）。
-    private static func pickPrimaryResource(
-        _ classified: [(resource: PHAssetResource, role: String)]
-    ) -> PHAssetResource? {
-        let order: [PHAssetResourceType] = [
-            .fullSizePhoto, .photo, .alternatePhoto,
-            .fullSizeVideo, .video,
+    /// 单一事实来源：分类、选主文件、选扩展名都走这里，
+    /// 避免「一边认为是 RAW、一边当成普通照片」这种自相矛盾。
+    private static func isRawUTI(_ uti: String) -> Bool {
+        let u = uti.lowercased()
+        return u.contains("raw-image") || u.contains("dng")
+            || u.contains("adobe.raw") || u.contains("x-adobe")
+    }
+
+    /// PHAssetResourceType.rawValue → 可读名称（仅用于日志与诊断）
+    private static func resourceTypeName(_ raw: Int) -> String {
+        let names: [Int: String] = [
+            1: "photo", 2: "video", 3: "pairedVideo",
+            4: "fullSizePhoto", 5: "fullSizeVideo", 6: "fullSizePairedVideo",
+            7: "poster", 8: "alternatePhoto", 9: "alternateVideo",
+            10: "alternatePairedVideo", 11: "adjustment", 12: "adjustmentBase",
         ]
-        for t in order {
-            if let hit = classified.first(where: { $0.resource.type == t }) {
-                return hit.resource
+        return names[raw] ?? "type(\(raw))"
+    }
+
+    /// 选出「主演示文件」，同时产出**每个资源的诊断明细**。
+    ///
+    /// ## 为什么 RAW 本体优先于渲染图
+    ///
+    /// 实测（2026-10-18，一台开了「风格」的 ProRAW iPhone）资源构成：
+    ///
+    /// ```text
+    /// [photo]         IMG_6699.DNG         com.adobe.raw-image
+    /// [poster]        Adjustments.plist    com.apple.property-list
+    /// [type16]        IMG_6699O.aae        com.apple.photos.apple-adjustment-envelope
+    /// [fullSizeVideo] FullSizeRender.jpg   public.jpeg
+    /// ```
+    ///
+    /// **iOS 把 ProRAW 的原始 DNG 放在 photo 主槽位**，渲染图另开一个槽；
+    /// 相册里显示「RAW」正是跟着这个主槽位走的。
+    ///
+    /// 旧实现按槽位优先级（fullSizePhoto → photo → alternatePhoto → …）挑，
+    /// 结果挑中 `FullSizeRender.jpg`：备份出去的主文件成了 8MB 渲染 JPEG，
+    /// 67MB 的 DNG 被降级成附加资源。恢复时 DNG 走 `.alternatePhoto` 挂载，
+    /// 相册就显示成「JPEG + raw」、体积也变小，与原图对不上。
+    ///
+    /// 现在改为 **UTI 判定为 RAW 的资源当主文件**，渲染图降级为附加资源，
+    /// 写回相册时 photo 主槽位重新装上 DNG，显示结构与原图一致。
+    ///
+    /// 规则 2（无 RAW 的普通资产）保持旧行为不变，避免回归。
+    ///
+    /// - Parameter rawResourceCount: `PHAssetResource` 原始总数，
+    ///   用来暴露「有多少资源被 classifyResource 丢弃了」。
+    /// - Returns: 主资源（nil = 无可备份资源）+ 诊断明细数组
+    private static func pickPrimaryResource(
+        _ classified: [(resource: PHAssetResource, role: String)],
+        rawResourceCount: Int
+    ) -> (primary: PHAssetResource?, debug: [[String: Any]]) {
+        var primary: PHAssetResource?
+        var reason = "(未选中任何资源)"
+
+        // 规则 1：UTI 带 RAW 特征的才是「原图本体」
+        if let hit = classified.first(where: {
+            isRawUTI($0.resource.uniformTypeIdentifier)
+        }) {
+            primary = hit.resource
+            reason = "规则1 UTI 判定 RAW 本体: \(hit.resource.originalFilename)"
+        }
+
+        // 规则 2：没有 RAW 的普通资产，沿用槽位优先级（与旧行为一致）
+        if primary == nil {
+            let order: [PHAssetResourceType] = [
+                .fullSizePhoto, .photo, .alternatePhoto,
+                .fullSizeVideo, .video,
+            ]
+            for t in order {
+                if let hit = classified.first(where: { $0.resource.type == t }) {
+                    primary = hit.resource
+                    reason = "规则2 槽位优先级命中: \(resourceTypeName(t.rawValue))"
+                    break
+                }
             }
         }
-        return classified.first(where: { $0.role == "main" })?.resource
+
+        // 规则 3：兜底
+        if primary == nil, let hit = classified.first(where: { $0.role == "main" }) {
+            primary = hit.resource
+            reason = "规则3 兜底按 role==main"
+        }
+
+        var debug: [[String: Any]] = classified.enumerated().map { i, item in
+            [
+                "index": i,
+                "typeRawValue": Int(item.resource.type.rawValue),
+                "typeName": resourceTypeName(item.resource.type.rawValue),
+                "uti": item.resource.uniformTypeIdentifier,
+                "filename": item.resource.originalFilename,
+                "role": item.role,
+                "isPrimary": item.resource === primary,
+            ] as [String: Any]
+        }
+        debug.append(["summary": "primaryReason=\(reason)"])
+        debug.append(["summary": "rawResourceCount=\(rawResourceCount)"])
+        debug.append(["summary": "classifiedCount=\(classified.count)"])
+        debug.append(["summary": "skippedCount=\(rawResourceCount - classified.count)"])
+
+        return (primary, debug)
     }
 
     /// 组装导出结果（路径 + 内容哈希 + 资源构成），返回给 Dart
@@ -765,21 +848,47 @@ private func savePhotoWithExtras(call: FlutterMethodCall, result: @escaping Flut
         var newId: String?
         var failure: String?
 
+        // ---- 诊断日志：这一轮到底往相册里塞了什么 ----
+        // 只写 console 的 print 在用户侧是看不见的（要接 Xcode），
+        // 而「哪个资源被拒」恰恰只能在手机上复现，所以必须落盘。
+        let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path)
+        let mainBytes = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+        let mainUTI = (try? UTType(filenameExtension: fileURL.pathExtension))?
+            .preferredFilenameExtension ?? fileURL.pathExtension
+        let batchDesc = batch.map { e -> String in
+            let sz = (try? FileManager.default.attributesOfItem(atPath: e.url.path))?[.size]
+            return "\(e.kind)→type(\(e.type.rawValue)):\(e.url.lastPathComponent)[\(((sz as? NSNumber)?.int64Value) ?? 0)B]"
+        }.joined(separator: ", ")
+        AppDelegate.appendLogLine(
+            "[info] 写入相册 第\(index + 1)/\(attempts.count)次尝试"
+            + " 主文件=\(fileURL.lastPathComponent)(\(mainUTI), \(mainBytes)B)"
+            + " 本批附加=\(batch.count)/\(attempts[0].count) 个 [\(batchDesc)]"
+        )
+
         PHPhotoLibrary.shared().performChanges {
             let request = PHAssetCreationRequest.forAsset()
             // 主文件用 .photo 写入 —— 这是最稳的路径
             do {
                 try request.addResource(with: .photo, fileURL: fileURL, options: nil)
+                AppDelegate.appendLogLine("[info]   ✓ 主文件写入成功")
             } catch {
                 failure = "主文件写入被拒: \(error.localizedDescription)"
+                AppDelegate.appendLogLine("[error]   ✗ 主文件写入被拒: \(error.localizedDescription)")
                 return
             }
             for e in batch {
                 do {
                     try request.addResource(with: e.type, fileURL: e.url, options: nil)
+                    AppDelegate.appendLogLine(
+                        "[info]   ✓ 附加资源成功 kind=\(e.kind) type=\(e.type.rawValue) 文件=\(e.url.lastPathComponent)"
+                    )
                 } catch {
                     // 单个资源失败不应该毁掉整批：photo 已经加进去了
                     failure = "附加资源(\(e.kind))写入被拒: \(error.localizedDescription)"
+                    AppDelegate.appendLogLine(
+                        "[warn]   ✗ 附加资源被拒 kind=\(e.kind) type=\(e.type.rawValue)"
+                        + " 文件=\(e.url.lastPathComponent) → \(error.localizedDescription)"
+                    )
                 }
             }
             request.creationDate = creationDate
@@ -788,6 +897,11 @@ private func savePhotoWithExtras(call: FlutterMethodCall, result: @escaping Flut
             DispatchQueue.main.async {
                 if success, let id = newId {
                     let dropped = attempts[0].count - batch.count
+                    AppDelegate.appendLogLine(
+                        "[info] 写入相册成功 id=\(id)"
+                        + " 实际写入附加=\(batch.count)/\(attempts[0].count) 主动丢弃=\(dropped)"
+                        + " 期间报错=\(failure ?? "无")"
+                    )
                     result([
                         "id": id,
                         "written": batch.count,
@@ -803,10 +917,10 @@ private func savePhotoWithExtras(call: FlutterMethodCall, result: @escaping Flut
                     ?? error?.localizedDescription
                     ?? "performChanges 返回失败但无错误信息"
                 if index + 1 < attempts.count {
-                    print("PhotoBackup: 写入相册第 \(index + 1) 次尝试失败(\(msg))，降级重试")
+                    AppDelegate.appendLogLine("[warn] 第\(index + 1)次尝试失败(\(msg))，降级重试（舍弃编辑指令类资源）")
                     attempt(index + 1, lastError: msg)
                 } else {
-                    print("PhotoBackup: 写入相册全部尝试均失败: \(msg)")
+                    AppDelegate.appendLogLine("[error] 三级降级后仍写入失败: \(msg)")
                     result(["id": NSNull(), "error": "三级降级后仍失败：\(msg)"])
                 }
             }
@@ -1020,12 +1134,37 @@ private func hashAssetResources(call: FlutterMethodCall, result: @escaping Flutt
                 return (resource: r, role: role)
             }
 
-        guard let primary = Self.pickPrimaryResource(classified) else {
-            result(false)
+        // 主文件选择 + 诊断信息（诊断数组会一路回传 Dart 落进 App 日志）
+        let picked = Self.pickPrimaryResource(
+            classified, rawResourceCount: resources.count
+        )
+        guard let primary = picked.primary else {
+            result(["error": "没有可备份的资源",
+                     "resourceDebug": picked.debug])
             return
         }
-        // 主文件之外的其他资源（DNG / Adjustments.plist / .aae …）
+        // 主文件之外的其他资源（渲染图 / Adjustments.plist / .aae …）
         let extras = classified.filter { $0.resource !== primary }
+
+        // ---- 诊断日志：资源构成 + 主文件选取过程 ----
+        // 原生日志与 Dart 写同一个 app.log，所以这段在电脑上也能看到
+        for row in picked.debug {
+            if let s = row["summary"] {
+                AppDelegate.appendLogLine("[info] 导出诊断 $s")
+            } else {
+                let mark = (row["isPrimary"] as? Bool) == true ? "★主文件" : "        "
+                AppDelegate.appendLogLine(
+                    "[info] 导出诊断   \(mark) [type(\(row["typeRawValue"] ?? -1))"
+                    + "/\(row["typeName"] ?? "?")] role=\(row["role"] ?? "?")"
+                    + " uti=\(row["uti"] ?? "?") 文件=\(row["filename"] ?? "?")"
+                )
+            }
+        }
+        AppDelegate.appendLogLine(
+            "[info] 导出诊断 选中主文件=\(primary.originalFilename)"
+            + " uti=\(primary.uniformTypeIdentifier) type(\(primary.type.rawValue))"
+            + " 附加资源 \(extras.count) 个"
+        )
 
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = isNetworkAccessAllowed
@@ -1039,20 +1178,23 @@ private func hashAssetResources(call: FlutterMethodCall, result: @escaping Flutt
             case .failure(let error):
                 DispatchQueue.main.async {
                     print("PhotoBackup: Failed to write photo: \(error)")
+                    AppDelegate.appendLogLine("[error] 导出主文件失败: \(error.localizedDescription)")
                     result(false)
                 }
             case .success(let info):
                 let mainURL = Self.targetURL(for: targetPath, resource: primary)
                 // 导出附加资源（逐个，失败不阻断主文件）
                 var extraResults: [[String: Any]] = []
+                var failedExtras: [[String: Any]] = []
                 let group = DispatchGroup()
                 let lock = NSLock()
                 for item in extras {
                     group.enter()
                     let url = Self.extraResourceURL(mainURL: mainURL, role: item.role, resource: item.resource)
                     self.exportResource(item.resource, to: url, options: options) { r in
-                        if case .success(let info2) = r {
-                            lock.lock()
+                        lock.lock()
+                        switch r {
+                        case .success(let info2):
                             extraResults.append([
                                 "role": item.role,
                                 "path": url.path,
@@ -1060,9 +1202,21 @@ private func hashAssetResources(call: FlutterMethodCall, result: @escaping Flutt
                                 "bytes": info2.bytes,
                                 "uti": item.resource.uniformTypeIdentifier,
                                 "filename": item.resource.originalFilename,
+                                // 诊断用：原槽位信息
+                                "typeRawValue": Int(item.resource.type.rawValue),
+                                "typeName": Self.resourceTypeName(item.resource.type.rawValue),
                             ])
-                            lock.unlock()
+                        case .failure(let error):
+                            // 附加资源导出失败必须留痕 —— 否则清单里凭空少一个文件
+                            // 却查不到原因，表现就是「恢复后风格没了」
+                            failedExtras.append([
+                                "role": item.role,
+                                "uti": item.resource.uniformTypeIdentifier,
+                                "filename": item.resource.originalFilename,
+                                "error": error.localizedDescription,
+                            ])
                         }
+                        lock.unlock()
                         group.leave()
                     }
                 }
@@ -1071,6 +1225,8 @@ private func hashAssetResources(call: FlutterMethodCall, result: @escaping Flutt
                         path: mainURL.path, sha256: info.sha256,
                         bytes: info.bytes, summary: summary)
                     payload["extraResources"] = extraResults
+                    payload["failedExtras"] = failedExtras
+                    payload["resourceDebug"] = picked.debug
                     DispatchQueue.main.async { result(payload) }
                 }
             }

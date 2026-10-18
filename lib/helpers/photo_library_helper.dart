@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import '../services/log_service.dart';
+
 /// 单个资产的完整信息（对比「备份 vs 原图」用）
 class AssetDetail {
   final String localIdentifier;
@@ -314,9 +316,91 @@ class PhotoLibraryHelper {
         'targetPath': targetPath,
         'isNetworkAccessAllowed': isNetworkAccessAllowed,
       });
-      return ExportResult.fromChannel(result, targetPath);
-    } catch (e) {
+      final parsed = ExportResult.fromChannel(result, targetPath);
+      _logResourceDebug(localIdentifier, parsed, result);
+      return parsed;
+    } catch (e, st) {
+      // 以前这里是 `return null` 静默吞掉异常 —— 备份失败时日志里什么都不留，
+      // 只能靠文件数对不上反推。现在把异常和调用栈一起落盘。
+      LogService.instance.write(
+        LogLevel.error,
+        _logTag,
+        '导出失败 [$localIdentifier]: $e',
+        e,
+        st,
+      );
       return null;
+    }
+  }
+
+  /// 写入 App 日志用的 tag（便于日志里按来源筛选）
+  static const _logTag = 'export';
+
+  /// 把原生侧的资源诊断明细原样落进 App 日志
+  ///
+  /// 这段日志是排查 ProRAW 槽位问题的**唯一可靠依据**：
+  /// 它记录的是 iOS 真实返回的 `type.rawValue` 与 UTI，
+  /// 而不是我们根据经验猜的映射表。日志可随 App 一起上传到电脑，
+  /// 所以「那台手机不在手边」不再是障碍。
+  static void _logResourceDebug(
+    String localIdentifier,
+    ExportResult? parsed,
+    Object? raw,
+  ) {
+    if (raw is! Map) return;
+    final err = raw['error'];
+    if (err != null && '$err'.isNotEmpty) {
+      LogService.instance.write(LogLevel.error, _logTag, '原生侧报错 [$localIdentifier]: $err');
+    }
+
+    final debugRows = parsed?.resourceDebug ?? const <Map<String, dynamic>>[];
+    LogService.instance.write(
+      LogLevel.info,
+      _logTag,
+      '导出诊断 [$localIdentifier] 共 ${debugRows.length} 条',
+    );
+
+    for (final d in debugRows) {
+      final summary = d['summary'];
+      if (summary != null) {
+        LogService.instance.write(LogLevel.info, _logTag, '  [汇总] $summary');
+        continue;
+      }
+      final mark = d['isPrimary'] == true ? '★主文件' : '       ';
+      LogService.instance.write(
+        LogLevel.info,
+        _logTag,
+        '  $mark [${d['typeRawValue']}/${d['typeName']}]'
+        ' role=${d['role']}'
+        ' uti=${d['uti']}'
+        ' 文件=${d['filename']}',
+      );
+    }
+
+    for (final e in parsed?.failedExtras ?? const <Map<String, dynamic>>[]) {
+      LogService.instance.write(
+        LogLevel.error,
+        _logTag,
+        '附加资源导出失败 role=${e['role']}'
+        ' 文件=${e['filename']}'
+        ' uti=${e['uti']}'
+        ' → ${e['error']}',
+      );
+    }
+
+    final extras = parsed?.extraResources ?? const <ExportedResource>[];
+    LogService.instance.write(
+      LogLevel.info,
+      _logTag,
+      '备份结果: 主文件 ${parsed?.bytes ?? 0} 字节，附加 ${extras.length} 个',
+    );
+    for (final e in extras) {
+      LogService.instance.write(
+        LogLevel.info,
+        _logTag,
+        '  附加 role=${e.role} ${e.bytes} 字节'
+        ' uti=${e.uti} 原名=${e.filename}',
+      );
     }
   }
 
@@ -524,6 +608,8 @@ class ExportResult {
     required this.resourcePrimary,
     required this.resourceAuxiliary,
     this.extraResources = const [],
+    this.resourceDebug = const [],
+    this.failedExtras = const [],
   });
 
   final String path;
@@ -547,6 +633,22 @@ class ExportResult {
   /// 实测一个开了「风格」的 ProRAW 资产有 4 个资源，主文件只是其中之一：
   /// RAW 原图（DNG）、Adjustments.plist（风格记录）、.aae（编辑数据）都在这里。
   final List<ExportedResource> extraResources;
+
+  /// 原生侧回传的**资源诊断明细**（每个 PHAssetResource 一条）
+  ///
+  /// 为什么需要它：ProRAW 的槽位归属在不同 iOS 版本上会变，光看
+  /// 「备份出了什么文件」无法判断「iOS 原本把它放在哪个槽」。
+  /// 这里把 `type.rawValue` / UTI / 角色 / 是否被选为主文件全部记下来，
+  /// 上传到电脑后就能一锤定音，不用反复编译试探。
+  ///
+  /// 约定：以 `summary` 开头的条目是整体统计，不是单个资源。
+  final List<Map<String, dynamic>> resourceDebug;
+
+  /// 导出失败的附加资源（role / 文件名 / 错误信息）
+  ///
+  /// 以前附加资源导出失败是**静默吞掉**的，表现就是「清单里凭空少一个
+  /// 文件，却查不到原因」——最终变成「恢复后风格没了」。
+  final List<Map<String, dynamic>> failedExtras;
 
   /// 实际备份了几个文件：主文件 + 附加资源
   int get backedResourceCount => 1 + extraResources.length;
@@ -581,6 +683,16 @@ class ExportResult {
       return const [];
     }
 
+    // platform channel 回来的 Map 是 Map<Object?, Object?>，
+    // 直接 whereType<Map<String,dynamic>> 会全部落空，必须逐项转键
+    List<Map<String, dynamic>> parseMapList(Object? v) {
+      if (v is! List) return const [];
+      return v
+          .whereType<Map>()
+          .map((e) => e.map((k, val) => MapEntry('$k', val)))
+          .toList();
+    }
+
     final extras = <ExportedResource>[];
     final rawExtras = raw['extraResources'];
     if (rawExtras is List) {
@@ -606,6 +718,8 @@ class ExportResult {
       resourcePrimary: splitList(raw['primary']),
       resourceAuxiliary: splitList(raw['auxiliary']),
       extraResources: extras,
+      resourceDebug: parseMapList(raw['resourceDebug']),
+      failedExtras: parseMapList(raw['failedExtras']),
     );
   }
 }
