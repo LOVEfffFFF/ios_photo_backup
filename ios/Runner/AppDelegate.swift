@@ -1072,7 +1072,7 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
                 DispatchQueue.main.async { result(payload) }
             }
 
-            asset.requestContentEditingInput { input in
+            asset.requestContentEditingInput { input, _ in
                 answered = true
 
                 var adjBytes = 0
