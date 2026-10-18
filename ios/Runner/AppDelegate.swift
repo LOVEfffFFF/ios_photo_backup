@@ -917,16 +917,24 @@ private func savePhotoWithExtras(call: FlutterMethodCall, result: @escaping Flut
             + conflictDropped.joined(separator: "; "))
     }
     let safeExtras = uniqueExtras.filter { !isAdjustment($0) }
-    let adjustmentExtras = uniqueExtras.filter { isAdjustment($0) }
+        let aaeExtras = uniqueExtras.filter { $0.kind == "adjustmentEnvelope" }
+        let plistExtras = uniqueExtras.filter { $0.kind == "adjustmentPlist" }
 
-    let creationDate = Date(timeIntervalSince1970: creationDateTimeInterval / 1000.0)
+        let creationDate = Date(timeIntervalSince1970: creationDateTimeInterval / 1000.0)
 
-    // 三级尝试：全部 → 只留安全资源 → 只写主文件
-    let attempts: [[Extra]] = [
-        safeExtras + adjustmentExtras,
-        safeExtras,
-        [],
-    ]
+        // 逐级降重：全都要 → 逐个剥掉编辑类资源 → 只写主文件
+        //
+        // 旧实现是三级：全部 → 只留安全资源 → 空。中间那一步一刀切掉**两份**
+        // 编辑指令，于是哪怕只有一份被 iOS 拒收，两份都保不住。
+        // 现在两份编辑指令各占各的槽（.adjustment / .adjustmentBase），
+        // 就有条件「一份被拒还留另一份」——降级粒度必须比资源粒度更细。
+        let attempts: [[Extra]] = [
+          safeExtras + aaeExtras + plistExtras,
+          safeExtras + aaeExtras,
+          safeExtras + plistExtras,
+          safeExtras,
+          [],
+        ]
 
     func attempt(_ index: Int, lastError: String?) {
         let batch = attempts[index]
@@ -1002,11 +1010,18 @@ private func savePhotoWithExtras(call: FlutterMethodCall, result: @escaping Flut
                     ?? error?.localizedDescription
                     ?? "performChanges 返回失败但无错误信息"
                 if index + 1 < attempts.count {
-                    AppDelegate.appendLogLine("[warn] 第\(index + 1)次尝试失败(\(msg))，降级重试（舍弃编辑指令类资源）")
+                    // 说清楚这轮到底少塞了几个 —— 「舍弃编辑指令类资源」在
+                    // 5 级阶梯下已经不准确（有时只舍一份，不是全舍）
+                    let shed = attempts[0].count - batch.count
+                    AppDelegate.appendLogLine(
+                        "[warn] 第\(index + 1)/\(attempts.count)次尝试失败(\(msg))"
+                        + "，降级重试（本批少塞 \(shed) 个资源）")
                     attempt(index + 1, lastError: msg)
                 } else {
-                    AppDelegate.appendLogLine("[error] 三级降级后仍写入失败: \(msg)")
-                    result(["id": NSNull(), "error": "三级降级后仍失败：\(msg)"])
+                    AppDelegate.appendLogLine(
+                        "[error] \(attempts.count) 级降级用尽仍写入失败: \(msg)")
+                    result(["id": NSNull(),
+                            "error": "\(attempts.count) 级降级后仍失败：\(msg)"])
                 }
             }
         }
@@ -1039,14 +1054,23 @@ private func savePhotoWithExtras(call: FlutterMethodCall, result: @escaping Flut
 /// 所以 render 必须走 `.alternatePhoto`，见 `BackupResource.restoreType`。
 private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetResourceType? {
     switch kind {
-    case "adjustmentEnvelope", "adjustmentPlist":
-        // Adjustments.plist / .aae —— 编辑指令与数据。
-        // 没有对应的公开枚举成员，用 alternatePhoto 承载。
+    case "adjustmentEnvelope":
+        // IMG_xxxxO.aae（apple-adjustment-envelope，iOS 16+ 的标准编辑数据封装）
         //
-        // 代价：与渲染图（也走 alternatePhoto）抢同一个槽位，iOS 只收一个。
-        // 要根治得给编辑指令另找一个 iOS 肯收的槽 —— 原图里它待在 7 号，
-        // 很可能就是公开枚举 `.adjustment`，但**尚未实测**，不猜。
-        return .alternatePhoto
+        // **本次实验**：以前它和渲染图一起挤在 `.alternatePhoto`，一个槽只收
+        // 一个 → 滤镜必丢。改投公开枚举 `.adjustment` —— 这才是「编辑数据」
+        // 名副其实的槽位。原图里 `Adjustments.plist` 就待在 type(7)，
+        // 强烈暗示 `.adjustment` 就是 7。
+        //
+        // Swift 枚举来自 NS_ENUM，成员 rawValue 互不相同，因此 `.adjustment`
+        // 必定不等于 `.alternatePhoto`(实测 4)，**分槽在编译期就成立**，
+        // 不靠猜编号。到底 iOS 肯不肯收，由实跑验证（见 savePhotoWithExtras
+        // 的逐级降级：被拒就自动退回旧行为，不会比现在更糟）。
+        return .adjustment
+    case "adjustmentPlist":
+        // Adjustments.plist（旧格式的编辑指令）。与 .aae 分槽，
+        // 否则两者自己先撞起来。去 `.adjustmentBase`（调整基图）。
+        return .adjustmentBase
     case "pairedVideo":
         return .pairedVideo
     case "fullSizePhoto":
