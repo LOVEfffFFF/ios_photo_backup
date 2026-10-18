@@ -645,6 +645,33 @@ private func photoBackupSignalHandler(_ sig: Int32) {
         if uti.contains("adjustment-envelope") { return "adjustmentAAE" }
         if uti.contains("property-list") { return "adjustment" }
 
+        // ProRAW 的**渲染图**：iOS 生成的文件名固定是 FullSizeRender.*，
+        // UTI 是 public.jpeg / public.heic。
+        //
+        // ## 为什么必须靠文件名识别，不能靠槽位
+        //
+        // 上一版把 render 分支挂在 `case .video, .fullSizeVideo` 上，
+        // 结果运行时**根本没走到**（日志三次都是 `role=main`）。
+        // 原因：`switch` 匹配的是 Swift 枚举成员，不是 rawValue 数字。
+        // 实测（2026-10-18，同一台开了风格的 ProRAW iPhone）：
+        //   · FullSizeRender.jpg  type.rawValue = 5
+        //   · `.alternatePhoto`    rawValue = 4   ← 日志 `kind=alternate type=4`
+        // 5 号在枚举里属于 photo 家族，于是落进下面的
+        // `case .photo, .fullSizePhoto, .alternatePhoto` 被判成 "main"。
+        //
+        // 后果是渲染图与 Adjustments.plist、.aae 三者都映射到
+        // `.alternatePhoto`，iOS 只收一个 → 滤镜丢失。
+        //
+        // 文件名 + UTI 双重特征，不依赖任何枚举编号，最稳。
+        let fname = r.originalFilename.lowercased()
+        if fname.hasPrefix("fullsizerender"),
+           uti.contains("image") || uti.contains("jpeg") || uti.contains("heic") {
+            AppDelegate.appendLogLine(
+                "[info] classify 命中 render 分支 type(\(r.type.rawValue))"
+                + " uti=\(r.uniformTypeIdentifier) 文件=\(r.originalFilename)")
+            return "render"
+        }
+
         // RAW 原图
         if isRawUTI(uti) { return "raw" }
 
@@ -654,12 +681,9 @@ private func photoBackupSignalHandler(_ sig: Int32) {
         case .photo, .fullSizePhoto, .alternatePhoto:
             return "main"
         case .video, .fullSizeVideo:
-            // ProRAW 的**渲染图**被iOS 放在 fullSizeVideo 槽，但它 UTI 是
-            // public.jpeg —— 它是这张照片的渲染版本，不是「另一个视频」。
-            //
-            // 以前这里无条件返回 "main"，后果是渲染图和 photo 槽里的真正主资源
-            // 顶掉了同一个 role：清单里出现两条 role=main；恢复时它又和两份
-            // 编辑指令抢同一个 .alternatePhoto 槽位，滤镜就这么丢了。
+            // 真正的视频资源走到这里。若它的 UTI 却是静态图（ProRAW 渲染图
+            // 曾被观察到落在非视频槽，因此上面已按文件名提前拦下），
+            // 仍按渲染图处理，免得它冒充 main 去抢编辑指令的槽位。
             if uti.contains("image") || uti.contains("jpeg") || uti.contains("heic") {
                 return "render"
             }
@@ -686,12 +710,25 @@ private func photoBackupSignalHandler(_ sig: Int32) {
     }
 
     /// PHAssetResourceType.rawValue → 可读名称（仅用于日志与诊断）
+    ///
+    /// ## 这张表曾经把排查带进沟里
+    ///
+    /// 旧表把 4 标成 `fullSizePhoto`、5 标成 `fullSizeVideo`，
+    /// 于是我们认定「ProRAW 渲染图在 fullSizeVideo 槽」，
+    /// 并据此把 render 分支挂在 `case .video, .fullSizeVideo` 上 —— 结果运行时
+    /// 一次都没走到（日志恒为 `role=main`），因为 `switch` 匹配的是枚举成员，
+    /// 5 号实际落在 photo 家族那一档。
+    ///
+    /// 目前**只有 4 是实测确认的**：写入 `kind=alternate`（即 `.alternatePhoto`）
+    /// 成功，且副本回读 rawValue 也是 4（日志 `✓ 附加资源成功 kind=alternate type=4`）。
+    /// 其余编号未逐一验证，宁可标成 `type(n)` 也不猜——猜错编号会再次误导排查。
     private static func resourceTypeName(_ raw: Int) -> String {
         let names: [Int: String] = [
             1: "photo", 2: "video", 3: "pairedVideo",
-            4: "fullSizePhoto", 5: "fullSizeVideo", 6: "fullSizePairedVideo",
-            7: "poster", 8: "alternatePhoto", 9: "alternateVideo",
-            10: "alternatePairedVideo", 11: "adjustment", 12: "adjustmentBase",
+            4: "alternatePhoto", // 实测：.alternatePhoto.rawValue == 4
+            5: "type(5)", // 实测：ProRAW 渲染图落在这一槽，枚举归属未确认
+            7: "type(7)", // 实测：Adjustments.plist 落在这一槽
+            16: "type(16)", // 实测：.aae 落在这一槽
         ]
         return names[raw] ?? "type(\(raw))"
     }
