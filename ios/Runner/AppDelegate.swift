@@ -1128,9 +1128,10 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
             result(["error": "参数不完整"])
             return
         }
-        let hexLimit = (args["hexLimit"] as? num)?.toInt() ?? 512
+        // NSNumber，不是 Dart 的 num —— 参数从 Flutter 通道过来一律是 NSNumber
+        let hexLimit = (args["hexLimit"] as? NSNumber)?.intValue ?? 512
         // 超过这个大小就不往通道里塞内容了（通道不是传文件的通道）
-        let inlineLimit = (args["inlineLimit"] as? num)?.toInt() ?? 65536
+        let inlineLimit = (args["inlineLimit"] as? NSNumber)?.intValue ?? 65536
 
         let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil)
         guard let asset = fetch.firstObject else {
