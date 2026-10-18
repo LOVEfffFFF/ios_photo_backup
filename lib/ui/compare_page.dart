@@ -34,6 +34,10 @@ class _ComparePageState extends State<ComparePage> {
   AssetDetail? _phoneDetail;
   bool _loadingPhone = false;
 
+  /// 原图的编辑（滤镜）分析结果
+  AssetEditingInfo? _editing;
+  bool _loadingEditing = false;
+
   /// 当前选中的备份记录。单独存一份是因为 _pick 里只把 localIdentifier
   /// 拿去向原生查询了，record 本身被丢弃了 —— 而导出报告需要它。
   BackupRecord? _picked;
@@ -85,13 +89,22 @@ class _ComparePageState extends State<ComparePage> {
     setState(() {
       _picked = record;
       _phoneDetail = null;
+      _editing = null;
       _loadingPhone = true;
+      _loadingEditing = true;
     });
+    // 并行取：编辑分析要走 PHContentEditingInput，最坏要等 8 秒超时，
+    // 串行会让点开记录后白等很久
     final detail = await PhotoLibraryHelper.fetchAssetDetail(record.localIdentifier);
+    final editing =
+        await PhotoLibraryHelper.analyzeAssetEditing(record.localIdentifier);
     if (!mounted) return;
+    PhotoLibraryHelper.logEditingInfo('对比页', editing);
     setState(() {
       _phoneDetail = detail;
+      _editing = editing;
       _loadingPhone = false;
+      _loadingEditing = false;
     });
   }
 
@@ -259,6 +272,31 @@ class _ComparePageState extends State<ComparePage> {
           sb.writeln('    → 判定: **不完整** —— 原图 $totalCount 个资源，'
               '实际备份 $backedCount 个，差 $missing 个');
           sb.writeln('    → 恢复后会丢失对应信息（深度/动态范围/第二份格式）');
+        }
+
+        // 编辑（滤镜）分析：来自 PHContentEditingInput
+        sb.writeln('');
+        sb.writeln('  编辑（滤镜）分析:');
+        if (_loadingEditing) {
+          sb.writeln('    正在分析…');
+        } else if (_editing == null) {
+          sb.writeln('    未获取到（原生返回空，可能无相册权限或资产已删）');
+        } else {
+          final ed = _editing!;
+          sb.writeln('    是否有编辑: ${ed.hasAdjustments ? "是" : "否"}');
+          sb.writeln('    编辑类资源: ${ed.adjustmentResourceCount} 个');
+          for (final r in ed.adjustmentResources) {
+            sb.writeln('      - type(${r['typeRawValue']})/${r['typeName']}'
+                ' uti=${r['uti']} 文件=${r['filename']}');
+          }
+          sb.writeln('    iOS 编辑指令: ${ed.contentAdjustmentBytes} 字节'
+              '${ed.timedOut ? "（原生侧超时，值为 0 不可信）" : ""}');
+          sb.writeln('    编辑指令哈希: '
+              '${ed.contentAdjustmentSha256.isEmpty ? "(无)" : ed.contentAdjustmentSha256}');
+          sb.writeln('    可再编辑: ${ed.isContentEditable ? "是" : "否"}');
+          sb.writeln('    渲染成片: ${ed.renderedImageBytes} 字节');
+          sb.writeln('    ⚠ 滤镜名称程序读不出来（adjustmentData 是 Apple 私有格式），'
+              '要确认滤镜名请在照片编辑界面看');
         }
 
         // 一致性判定：哪些字段对不上

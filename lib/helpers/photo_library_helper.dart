@@ -251,6 +251,61 @@ class PhotoLibraryHelper {
     return false;
   }
 
+  /// 分析资产的编辑（滤镜 / 风格）状态
+  ///
+  /// 底层是 `PHContentEditingInput`，能取到 iOS **自己的**编辑指令哈希 ——
+  /// 这是判断「滤镜有没有被我们写丢」的决定性证据。
+  ///
+  /// 拿不到滤镜名称，原因见 [AssetEditingInfo] 的说明。
+  ///
+  /// 原生侧有 8 秒超时兜底：`requestContentEditingInput` 在需要用户交互时
+  /// 可能既不回调也不报错，不设兜底会让这里一直挂着。
+  static Future<AssetEditingInfo?> analyzeAssetEditing(
+    String localIdentifier,
+  ) async {
+    if (localIdentifier.isEmpty) return null;
+    try {
+      final result = await _channel.invokeMethod('analyzeAssetEditing', {
+        'localIdentifier': localIdentifier,
+      });
+      return AssetEditingInfo.fromChannel(result);
+    } catch (e) {
+      LogService.instance.write(
+        LogLevel.warn,
+        'edit',
+        '分析编辑信息失败 [$localIdentifier]: $e',
+      );
+      return null;
+    }
+  }
+
+  /// 把编辑分析结果逐条写进日志
+  static void logEditingInfo(String prefix, AssetEditingInfo? info) {
+    if (info == null) {
+      LogService.instance.write(
+        LogLevel.warn,
+        'edit',
+        '$prefix 编辑分析: 拿不到（原生返回空，可能无权限或资产已删）',
+      );
+      return;
+    }
+    LogService.instance.write(
+      LogLevel.info,
+      'edit',
+      '$prefix ${info.summary} 可再编辑=${info.isContentEditable}'
+      ' 渲染图=${info.renderedImageBytes}B 资源数=${info.resourceCount}'
+      '${info.timedOut ? " [超时]" : ""}',
+    );
+    for (final r in info.adjustmentResources) {
+      LogService.instance.write(
+        LogLevel.info,
+        'edit',
+        '$prefix   编辑资源 type(${r['typeRawValue']})/${r['typeName']}'
+        ' uti=${r['uti']} 文件=${r['filename']}',
+      );
+    }
+  }
+
   /// 读取某个资产**当前**各资源的字节哈希（只读，不产生副作用）
   ///
   /// 往返验证的核心：恢复导入相册后拿副本的资源哈希与原图比对，
@@ -819,6 +874,102 @@ class AssetResourceHash {
               .map((e) => e.map((k, v) => MapEntry('$k', v)))
               .toList() ??
           const [],
+    );
+  }
+}
+
+/// 资产的编辑（滤镜 / 风格）分析结果
+///
+/// 来自原生 `analyzeAssetEditing`，底层是 `PHContentEditingInput`。
+///
+/// ## 为什么需要它
+///
+/// 「恢复出来的滤镜对不对」这个问题，光看哈希答不了 —— 两个文件字节一样，
+/// 但挂在不同槽位，相册表现完全不同。真正能下结论的是
+/// **原图与副本的 `adjustmentData` 是否逐字节一致**：
+///
+/// · 一致 → 我们的链路没丢编辑数据。若显示仍不同，就是 iOS 不认那个槽位，
+///   属于平台限制，可以直接下结论；
+/// · 不一致 → 是我们写丢了，得继续查。
+///
+/// ## 拿不到的东西
+///
+/// **滤镜名称**（鲜艳 / 暖色 / 纪实…）。`adjustmentData` 是 Apple 私有二进制，
+/// 实测套了风格的 ProRAW 是 232 字节高熵数据、无任何字符串，程序读不出名字。
+/// 想知道名字只能由用户在照片编辑界面自己看。
+class AssetEditingInfo {
+  const AssetEditingInfo({
+    required this.assetId,
+    required this.hasAdjustments,
+    required this.adjustmentResourceCount,
+    required this.adjustmentResources,
+    required this.contentAdjustmentBytes,
+    required this.contentAdjustmentSha256,
+    required this.isContentEditable,
+    required this.renderedImagePath,
+    required this.renderedImageBytes,
+    required this.resourceCount,
+    this.timedOut = false,
+  });
+
+  final String assetId;
+
+  /// 相册里是否挂了编辑（滤镜/风格）资源
+  final bool hasAdjustments;
+  final int adjustmentResourceCount;
+  final List<Map<String, dynamic>> adjustmentResources;
+
+  /// iOS 自己的编辑指令字节数与哈希（权威来源）
+  final int contentAdjustmentBytes;
+  final String contentAdjustmentSha256;
+
+  final bool isContentEditable;
+
+  /// iOS 当前渲染出的成片
+  final String renderedImagePath;
+  final int renderedImageBytes;
+
+  final int resourceCount;
+
+  /// 原生侧 8 秒没等到回调（`requestContentEditingInput` 偶尔不回调）
+  final bool timedOut;
+
+  /// 编辑指令的短哈希，便于日志与界面比对
+  String get shortAdjSha => contentAdjustmentSha256.isEmpty
+      ? '(无编辑数据)'
+      : '${contentAdjustmentSha256.substring(0, 16)}…';
+
+  String get summary => timedOut
+      ? '原生侧超时未返回'
+      : (hasAdjustments
+          ? '已编辑 adj=${contentAdjustmentBytes}B ${shortAdjSha}'
+          : '未发现编辑');
+
+  static AssetEditingInfo? fromChannel(Object? raw) {
+    if (raw is! Map) return null;
+    List<Map<String, dynamic>> maps(Object? v) {
+      if (v is! List) return const [];
+      return v
+          .whereType<Map>()
+          .map((e) => e.map((k, val) => MapEntry('$k', val)))
+          .toList();
+    }
+
+    return AssetEditingInfo(
+      assetId: '${raw['assetId'] ?? ''}',
+      hasAdjustments: raw['hasAdjustments'] == true,
+      adjustmentResourceCount:
+          (raw['adjustmentResourceCount'] as num?)?.toInt() ?? 0,
+      adjustmentResources: maps(raw['adjustmentResources']),
+      contentAdjustmentBytes:
+          (raw['contentAdjustmentBytes'] as num?)?.toInt() ?? 0,
+      contentAdjustmentSha256:
+          '${raw['contentAdjustmentSha256'] ?? ''}',
+      isContentEditable: raw['isContentEditable'] == true,
+      renderedImagePath: '${raw['renderedImagePath'] ?? ''}',
+      renderedImageBytes: (raw['renderedImageBytes'] as num?)?.toInt() ?? 0,
+      resourceCount: (raw['resourceCount'] as num?)?.toInt() ?? 0,
+      timedOut: raw['timedOut'] == true,
     );
   }
 }

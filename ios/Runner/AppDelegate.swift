@@ -285,6 +285,8 @@ private func photoBackupSignalHandler(_ sig: Int32) {
             getAssetDetail(call: call, result: result)
         case "hashAssetResources":
             hashAssetResources(call: call, result: result)
+        case "analyzeAssetEditing":
+            analyzeAssetEditing(call: call, result: result)
         case "deleteAssets":
             deleteAssets(call: call, result: result)
         case "savePhotoWithExtras":
@@ -1056,6 +1058,133 @@ private func deleteAssets(call: FlutterMethodCall, result: @escaping FlutterResu
         }
         DispatchQueue.main.async {
             result(["deleted": ok, "failed": failed])
+        }
+    }
+
+    // MARK: - 分析资产的编辑信息
+
+    /// 分析某个资产的**编辑（滤镜/风格）状态**，供 Dart 侧展示与比对。
+    ///
+    /// ## 能拿到什么
+    ///
+    /// 通过 `PHContentEditingInput` 可以取到：
+    ///   · `adjustmentData` —— iOS 自己的编辑指令（**权威来源**，比从资源里
+    ///     抠出来的 Adjustments.plist 更可靠），能算字节数与 SHA256；
+    ///   · `fullSizeImageURL` —— iOS 当前渲染出的成片；
+    ///   · `isContentEditable` —— 是否还能继续编辑。
+    ///
+    /// ## 拿不到什么
+    ///
+    /// **滤镜名称**。Apple 从不公开 `adjustmentData` 的内部结构
+    /// （实测一个套了风格的 ProRAW 是 232 字节高熵二进制，无字符串、无可辨结构），
+    /// 所以「鲜艳/暖色/纪实」这类名字无法由程序读出，只能由用户在编辑界面看。
+    /// 想确认名字就用 `restoreType` 那条路：比对 adjustmentData 的 SHA256。
+    ///
+    /// ## 注意：可能不回调
+    ///
+    /// `requestContentEditingInput` 在需要用户交互时可能既不回调也不报错，
+    /// 所以这里必须带超时兜底，否则调用方会一直等下去。
+    private func analyzeAssetEditing(
+        call: FlutterMethodCall, result: @escaping FlutterResult
+    ) {
+        guard let args = call.arguments as? [String: Any],
+              let localIdentifier = args["localIdentifier"] as? String else {
+            result(nil)
+            return
+        }
+
+        PHPhotoLibrary.requestAuthorization { status in
+            guard self.isPhotoLibraryAccessGranted(status) else {
+                DispatchQueue.main.async { result(nil) }
+                return
+            }
+            let fetchResult = PHAsset.fetchAssets(
+                withLocalIdentifiers: [localIdentifier], options: nil)
+            guard let asset = fetchResult.firstObject else {
+                DispatchQueue.main.async { result(nil) }
+                return
+            }
+
+            let resources = PHAssetResource.assetResources(for: asset)
+
+            // 相册里挂着的编辑类资源（只列元数据，不读内容，很快）
+            let adjResources: [[String: Any]] = resources.compactMap { r in
+                let u = r.uniformTypeIdentifier.lowercased()
+                guard u.contains("adjustment") || u.contains("property-list") else {
+                    return nil
+                }
+                return [
+                    "typeRawValue": Int(r.type.rawValue),
+                    "typeName": Self.resourceTypeName(r.type.rawValue),
+                    "uti": r.uniformTypeIdentifier,
+                    "filename": r.originalFilename,
+                ] as [String: Any]
+            }
+
+            var sent = false
+            var answered = false
+            let send: ([String: Any]) -> Void = { payload in
+                guard !sent else { return }
+                sent = true
+                DispatchQueue.main.async { result(payload) }
+            }
+
+            asset.requestContentEditingInput { input in
+                answered = true
+
+                var adjBytes = 0
+                var adjSha = ""
+                if let d = input?.adjustmentData, !d.isEmpty {
+                    adjBytes = d.count
+                    let h = SHA256()
+                    h.update(data: d)
+                    adjSha = h.finalize()
+                        .map { String(format: "%02x", $0) }.joined()
+                }
+
+                let fsURL = input?.fullSizeImageURL
+                var renderBytes = 0
+                if let u = fsURL,
+                   let attrs = try? FileManager.default.attributesOfItem(atPath: u.path) {
+                    renderBytes = (attrs[.size] as? NSNumber)?.intValue ?? 0
+                }
+
+                send([
+                    "assetId": asset.localIdentifier,
+                    // 有没有编辑：相册里挂了编辑资源，或 adjustmentData 非空
+                    "hasAdjustments": !adjResources.isEmpty || adjBytes > 0,
+                    "adjustmentResourceCount": adjResources.count,
+                    "adjustmentResources": adjResources,
+                    "contentAdjustmentBytes": adjBytes,
+                    "contentAdjustmentSha256": adjSha,
+                    "isContentEditable": input?.isContentEditable ?? false,
+                    "renderedImagePath": fsURL?.path ?? "",
+                    "renderedImageBytes": renderBytes,
+                    "resourceCount": resources.count,
+                ])
+            }
+
+            // 超时兜底：这个 API 不回调时不能让调用方干等
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+                if !answered {
+                    AppDelegate.appendLogLine(
+                        "[warn] analyzeAssetEditing 超时: requestContentEditingInput 未回调"
+                        + " 资产=\(localIdentifier)")
+                    send([
+                        "assetId": asset.localIdentifier,
+                        "hasAdjustments": !adjResources.isEmpty,
+                        "adjustmentResourceCount": adjResources.count,
+                        "adjustmentResources": adjResources,
+                        "contentAdjustmentBytes": 0,
+                        "contentAdjustmentSha256": "",
+                        "isContentEditable": false,
+                        "renderedImagePath": "",
+                        "renderedImageBytes": 0,
+                        "resourceCount": resources.count,
+                        "timedOut": true,
+                    ])
+                }
+            }
         }
     }
 }

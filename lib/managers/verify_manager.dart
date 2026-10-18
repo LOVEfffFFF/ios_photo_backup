@@ -404,6 +404,35 @@ class VerifyManager {
         }
       }
 
+      // ---- ④b 编辑（滤镜）信息对比 ----
+      // 这是「滤镜对不对」的决定性证据：哈希一致说明编辑指令一个字节没丢，
+      // 若显示仍不同，那就是 iOS 不认我们写入的槽位（平台限制）；
+      // 不一致则说明是我们写丢了，还得继续查。
+      final origEdit = await PhotoLibraryHelper.analyzeAssetEditing(
+        record.localIdentifier,
+      );
+      PhotoLibraryHelper.logEditingInfo('原图编辑', origEdit);
+      final copyEdit = restoredId.isEmpty
+          ? null
+          : await PhotoLibraryHelper.analyzeAssetEditing(restoredId);
+      PhotoLibraryHelper.logEditingInfo('副本编辑', copyEdit);
+
+      if (origEdit != null && copyEdit != null) {
+        final same = origEdit.contentAdjustmentSha256.isNotEmpty &&
+            origEdit.contentAdjustmentSha256 ==
+                copyEdit.contentAdjustmentSha256;
+        _log(
+          same
+              ? '编辑数据对照: **一致**  adj=${origEdit.contentAdjustmentBytes}B'
+                  ' ${origEdit.shortAdjSha}（滤镜指令逐字节相同）'
+              : '编辑数据对照: **不一致**'
+                  '\n    原图 → ${origEdit.summary}'
+                  '\n    副本 → ${copyEdit.summary}'
+                  '\n    原图有编辑=${origEdit.hasAdjustments} 副本有编辑=${copyEdit.hasAdjustments}',
+          same ? LogLevel.info : LogLevel.warn,
+        );
+      }
+
       resources.add(ResourceVerifyResult(
         label: p.basename(record.relativePath),
         phase: 'main',
