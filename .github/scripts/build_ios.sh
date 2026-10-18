@@ -30,8 +30,11 @@ echo "=== 步骤 1/3：生成 Flutter 配置（${CONFIG}）==="
 # BUILD_TAG 注入真实构建时间，AppInfo.build 读它显示版本号。
 # 这样每次流水线构建出来的包版本号天然不同 —— 侧载没有升级提示，
 # 版本号是判断「装的到底是哪一版」最直接的一手证据。
+#
+# TZ 必须显式指定：GitHub runner 用 UTC，不指定的话 build 号会比
+# 本地时间晚 8 小时，看上去像「装错版本」，反而又制造了一次误解。
 flutter build ios --config-only --no-codesign \
-  --dart-define=BUILD_TAG="$(date '+%Y-%m-%d-%H:%M')"
+  --dart-define=BUILD_TAG="$(TZ=Asia/Shanghai date '+%Y-%m-%d-%H:%M')"
 
 echo "=== 步骤 2/3：xcodebuild 编译（显式关闭签名）==="
 # 删掉 Podfile 后项目走 Swift Package Manager，可能只有 .xcodeproj；
