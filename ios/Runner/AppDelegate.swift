@@ -1045,22 +1045,59 @@ private func hashAssetResources(call: FlutterMethodCall, result: @escaping Flutt
             return
         }
         let resources = PHAssetResource.assetResources(for: asset)
+
+        // 槽位选择**必须与备份时选主文件的规则完全一致**
+        //
+        // 旧实现在这里另写了一套「fullSizePhoto → photo → alternatePhoto → …」
+        // 的优先级。ProRAW 的 photo 槽装的是 DNG，于是它会选中 DNG 算哈希，
+        // 而备份出去的主文件是渲染图 JPEG —— 拿 DNG 的哈希去比 JPEG，
+        // 无论恢复做得多好都会判成不一致。验证基准本身就是错的。
+        //
+        // 现在统一走 pickPrimaryResource：UTI 判定为 RAW 的资源当基准。
+        let classified: [(resource: PHAssetResource, role: String)] = resources.compactMap {
+            guard let role = Self.classifyResource($0) else { return nil }
+            return (resource: $0, role: role)
+        }
+        let picked = Self.pickPrimaryResource(
+            classified, rawResourceCount: resources.count)
+
         let target: PHAssetResource?
         if preferVideo {
             target = resources.first(where: {
                 $0.type == .pairedVideo || $0.type == .fullSizePairedVideo
             })
         } else {
-            target = resources.first(where: { $0.type == .fullSizePhoto })
-                ?? resources.first(where: { $0.type == .photo })
-                ?? resources.first(where: { $0.type == .alternatePhoto })
-                ?? resources.first(where: { $0.type == .fullSizeVideo })
-                ?? resources.first(where: { $0.type == .video })
+            target = picked.primary
         }
         guard let resource = target else {
+            AppDelegate.appendLogLine(
+                "[warn] 算哈希时找不到目标资源 preferVideo=\(preferVideo)"
+                + " 资源数=\(resources.count) 资产=\(localIdentifier)")
             DispatchQueue.main.async { result(nil) }
             return
         }
+
+        // ---- 诊断：原图/副本的槽位构成，一并回传 ----
+        // 往返验证最想回答的是「恢复出来的结构 == 原图的结构吗」，
+        // 光有一个 sha256 答不了这个问题，必须把每个资源的槽位都列出来。
+        let detailRows: [[String: Any]] = classified.enumerated().map { i, item in
+            [
+                "index": i,
+                "typeRawValue": Int(item.resource.type.rawValue),
+                "typeName": Self.resourceTypeName(item.resource.type.rawValue),
+                "uti": item.resource.uniformTypeIdentifier,
+                "filename": item.resource.originalFilename,
+                "role": item.role,
+                "isHashTarget": item.resource === resource,
+            ] as [String: Any]
+        }
+        AppDelegate.appendLogLine(
+            "[info] 算哈希 preferVideo=\(preferVideo)"
+            + " 目标=\(resource.originalFilename)"
+            + " uti=\(resource.uniformTypeIdentifier)"
+            + " type(\(resource.type.rawValue))"
+            + " 槽位构成=\(classified.map { "\($0.resource.type.rawValue):\($0.resource.originalFilename)" }.joined(separator: ", "))"
+        )
 
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = true
@@ -1086,6 +1123,9 @@ private func hashAssetResources(call: FlutterMethodCall, result: @escaping Flutt
                     }
                     let hex = hasher.finalize()
                         .map { String(format: "%02x", $0) }.joined()
+                    AppDelegate.appendLogLine(
+                        "[info] 哈希完成 \(String(hex.prefix(16)))… \(total) 字节"
+                        + " 源=\(resource.originalFilename)")
                     result([
                         "sha256": hex,
                         "bytes": total,
@@ -1093,6 +1133,7 @@ private func hashAssetResources(call: FlutterMethodCall, result: @escaping Flutt
                         "filename": resource.originalFilename,
                         "resourceCount": resources.count,
                         "resourceSummary": Self.resourceSummary(asset),
+                        "resources": detailRows,
                     ])
                 }
             }

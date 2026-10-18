@@ -231,6 +231,21 @@ class VerifyManager {
     final originalStillThere =
         await PhotoLibraryHelper.assetExists(record.localIdentifier);
 
+    // ---- 验证输入：完整记下来 ----
+    // 往返验证的结论只有配上「当时验的是什么」才有意义。
+    // 以前只有结果被记下来，出问题后无法复现输入，只能干瞪眼。
+    _log('════════ 开始验证单个资产 ════════');
+    _log('资产ID: ${record.localIdentifier}');
+    _log('主文件: ${record.relativePath}');
+    _log('媒体类型: ${record.mediaType}  拍摄时间: ${record.creationTimestamp}');
+    _log('原图仍在相册: $originalStillThere');
+    _log('记录声明原图资源数: ${record.resourceTotal ?? "未知"}'
+        '  实际附加资源: ${record.extraResources.length} 个');
+    for (final e in record.extraResources) {
+      _log('  附加资源 ${e.role}: ${e.relativePath}'
+          ' uti=${e.uti} ${e.bytes}字节 写入槽位=${e.restoreType}');
+    }
+
     // ---- ① 读原图基准 ----
     final origMain = await PhotoLibraryHelper.hashAssetResources(
       localIdentifier: record.localIdentifier,
@@ -249,17 +264,31 @@ class VerifyManager {
         ? manifest?.clientSha256Of(record.livePhotoVideoRelativePath!)
         : null;
 
+    // ---- 基准记录：原图实际读到的槽位构成，是判断「结构是否一致」的依据 ----
+    _log('原图基准: ${_short(origMain?.sha256)} ${origMain?.bytes ?? 0} 字节'
+        ' uti=${origMain?.uti} 文件=${origMain?.filename}');
+    _log('清单基准: ${_short(expectMain)}');
+    if (origMain != null) {
+      origMain.logLayout('原图侧');
+    } else {
+      _log('原图侧: 读不到基准（资产可能已被删除）', LogLevel.warn);
+    }
+
     final tempDir = await FileHelper.getUploadTempDirectory();
     final mainPath = p.join(tempDir.path, 'vfy_${p.basename(record.relativePath)}');
 
     // ---- ② 下载 + 字节校验 + ③ 导入 ----
     var restoredId = '';
     try {
+      final sw = Stopwatch()..start();
       final bytes = await client.downloadFile(
         relativePath: record.relativePath,
         targetPath: mainPath,
       );
       final diskSha = await _sha256OfFile(mainPath);
+      sw.stop();
+      _log('下载主文件: ${p.basename(record.relativePath)} $bytes 字节'
+          ' 用时 ${sw.elapsedMilliseconds}ms 磁盘哈希=${_short(diskSha)}');
 
       if (isLive && record.livePhotoVideoRelativePath != null) {
         final videoPath = '$mainPath.mov';
@@ -295,11 +324,14 @@ class VerifyManager {
               relativePath: res.relativePath,
               targetPath: target,
             );
+            final sz = await _sizeOfFile(target);
             extras.add({
               'restoreType': res.restoreType,
               'path': target,
             });
             tempFiles.add(target);
+            _log('下载附加资源 ${res.role}: ${p.basename(target)}'
+                ' $sz 字节 写入槽位=${res.restoreType}');
           } catch (e) {
             LogService.instance.write(
               LogLevel.warn,
@@ -310,21 +342,28 @@ class VerifyManager {
         }
 
         if (extras.isNotEmpty) {
+          _log('写入副本: savePhotoWithExtras'
+              ' 附加 ${extras.length} 个 槽位='
+              '${extras.map((e) => e['restoreType']).join(",")}');
           final r = await PhotoLibraryHelper.savePhotoWithExtras(
             filePath: mainPath,
             creationTimestamp: record.creationTimestamp,
             extras: extras,
           );
           restoredId = r.assetId;
+          _log('写入结果: ok=${r.ok} written=${r.written} failed=${r.failed}'
+              ' warning=${r.warning} error=${r.error} assetId=$restoredId');
           for (final f in tempFiles) {
             _safeDelete(f);
           }
           if (!r.ok) {
             // 降级：至少把主文件写进去，别让整个验证失败
+            _log('写入失败，降级为只写主文件: ${r.error}', LogLevel.warn);
             restoredId = await PhotoLibraryHelper.savePhotoToLibrary(
               filePath: mainPath,
               creationTimestamp: record.creationTimestamp,
             ) ?? '';
+            _log('降级写入结果: ${restoredId.isEmpty ? "仍失败" : "ok assetId=$restoredId"}');
           } else if (r.failed > 0) {
             LogService.instance.write(
               LogLevel.warn,
@@ -334,10 +373,12 @@ class VerifyManager {
             );
           }
         } else {
+          _log('无附加资源，写入副本: savePhotoToLibrary（仅主文件）');
           restoredId = await PhotoLibraryHelper.savePhotoToLibrary(
             filePath: mainPath,
             creationTimestamp: record.creationTimestamp,
           ) ?? '';
+          _log('写入结果: ${restoredId.isEmpty ? "失败" : "ok assetId=$restoredId"}');
         }
       }
 
@@ -347,6 +388,21 @@ class VerifyManager {
           : await PhotoLibraryHelper.hashAssetResources(
               localIdentifier: restoredId,
             );
+      _log('副本基准: ${_short(copyHash?.sha256)} ${copyHash?.bytes ?? 0} 字节'
+          ' uti=${copyHash?.uti} 文件=${copyHash?.filename}');
+      if (copyHash != null) {
+        copyHash.logLayout('副本侧');
+        // 结构对照：副本槽位与原图槽位是否一致，比 sha256 更能说明问题
+        if (origMain != null) {
+          final sameLayout = origMain.layoutLabel == copyHash.layoutLabel;
+          _log(sameLayout
+              ? '结构对照: 副本与原图槽位一致'
+              : '结构对照: **不一致**'
+                  '\n    原图 → ${origMain.layoutLabel}'
+                  '\n    副本 → ${copyHash.layoutLabel}',
+              sameLayout ? LogLevel.info : LogLevel.warn);
+        }
+      }
 
       resources.add(ResourceVerifyResult(
         label: p.basename(record.relativePath),
@@ -420,6 +476,24 @@ class VerifyManager {
       }
     }
 
+    // ---- 结论：把每个阶段的判定和哈希都落下来，事后不用复现 ----
+    final bad = resources.where((r) => !r.ok).length;
+    _log('── 单资产验证结束 ──');
+    for (final r in resources) {
+      _log('  [${r.ok ? "通过" : "不通过"}] ${r.phase} ${r.label}',
+          r.ok ? LogLevel.info : LogLevel.warn);
+      _log('    下载=${_short(r.downloadedSha)} ${r.downloadedBytes ?? 0}B'
+          ' 清单=${_short(r.expectedFromBackup)}'
+          ' 原图=${_short(r.originalSha)} ${r.originalBytes ?? 0}B'
+          ' 副本=${_short(r.restoredSha)}(${r.restoredShaFrom})'
+          '${r.note != null ? " 备注=${r.note}" : ""}');
+    }
+    _log(bad == 0
+        ? '结论: 全部 ${resources.length} 个阶段通过'
+        : '结论: ${resources.length} 个阶段中 $bad 个不通过',
+        bad == 0 ? LogLevel.info : LogLevel.warn);
+    _log('══════════════════════════════════════');
+
     return AssetVerifyResult(
       record: record,
       resources: resources,
@@ -435,6 +509,24 @@ class VerifyManager {
     final present = values.where((v) => v != null && v.isNotEmpty).toList();
     if (present.isEmpty) return false;
     return present.every((v) => v == present.first);
+  }
+
+  /// 验证过程的统一日志出口（tag 固定 verify）
+  static void _log(String msg, [LogLevel level = LogLevel.info]) {
+    LogService.instance.write(level, 'verify', msg);
+  }
+
+  /// 哈希太长，日志里只留前 16 位便于肉眼比对
+  static String _short(String? sha) =>
+      (sha == null || sha.isEmpty) ? '(无)' : '${sha.substring(0, 16)}…';
+
+  /// 取文件大小，失败返回 0（只用于日志，不影响验证结论）
+  static Future<int> _sizeOfFile(String path) async {
+    try {
+      return await File(path).length();
+    } catch (_) {
+      return 0;
+    }
   }
 
   Future<String?> _sha256OfFile(String path) async {

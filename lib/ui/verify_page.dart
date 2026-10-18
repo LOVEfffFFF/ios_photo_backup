@@ -122,6 +122,9 @@ class _VerifyPageState extends State<VerifyPage> {
             '${result.error != null ? " (${result.error})" : ""}',
       );
     }
+
+    // 验证一结束就把日志送回电脑：留在手机里的日志等于没留
+    await _uploadLogs();
   }
 
   /// 清理本次会话创建的所有副本
@@ -160,6 +163,29 @@ class _VerifyPageState extends State<VerifyPage> {
         '${r.failed > 0 ? "，${r.failed} 个失败" : ""}');
   }
 
+  /// 上传日志到电脑
+  ///
+  /// 验证过程中的每一步（下载、校验、写入相册、被拒资源、槽位对照）都写进了
+  /// App 日志，与原生侧写入**同一个** app.log。
+  ///
+  /// 但日志必须**主动上传**才有意义 —— 排查问题时人在电脑前，
+  /// 手机连着数据线，日志却传不回来，是最常见的时间黑洞。
+  /// 所以这里既提供手动按钮，也在每次验证结束后自动上传一次。
+  Future<void> _uploadLogs() async {
+    if (!_config.isConfigured) {
+      _toast('未配置服务器地址，无法上传日志', ok: false);
+      return;
+    }
+    try {
+      final n = await LogService.instance.upload();
+      if (!mounted) return;
+      _toast('已上传 $n 个日志文件 → 电脑 iPhoneBackup\\logs\\');
+    } catch (e) {
+      if (!mounted) return;
+      _toast('日志上传失败：$e', ok: false);
+    }
+  }
+
   void _toast(String msg, {bool ok = true}) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -184,6 +210,11 @@ class _VerifyPageState extends State<VerifyPage> {
                 child: const Icon(Icons.delete_sweep_outlined),
               ),
             ),
+          IconButton(
+            tooltip: '上传日志到电脑',
+            onPressed: _uploadLogs,
+            icon: const Icon(Icons.upload_file_outlined),
+          ),
           IconButton(onPressed: _load, icon: const Icon(Icons.refresh)),
         ],
       ),

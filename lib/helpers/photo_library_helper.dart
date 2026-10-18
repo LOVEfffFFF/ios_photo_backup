@@ -736,6 +736,7 @@ class AssetResourceHash {
     required this.filename,
     required this.resourceCount,
     required this.resourceSummary,
+    this.resources = const [],
   });
 
   /// 资源原始字节的 SHA-256
@@ -749,6 +750,49 @@ class AssetResourceHash {
 
   /// {total, primary, auxiliary} —— 用于资源完整度核对
   final Map<String, dynamic> resourceSummary;
+
+  /// 该资产当前**每个资源**的槽位明细（type rawValue / UTI / 文件名 / 是否算哈希的目标）
+  ///
+  /// 由原生侧只读元数据、不读字节生成，所以很快，验证时可以放心每次都取。
+  ///
+  /// 用途：往返验证真正要回答的是「恢复出来的**结构** == 原图的结构吗」。
+  /// 光有一个 sha256 答不了 —— 两个文件字节相同但挂在不同槽位，
+  /// 相册里的表现（「RAW」还是「JPEG + raw」）完全不同。
+  final List<Map<String, dynamic>> resources;
+
+  /// 槽位构成的一行可读摘要，直接进日志
+  String get layoutLabel => resources.isEmpty
+      ? '(无明细)'
+      : resources
+          .map((r) => '[${r['typeName']}]${r['filename']}'
+              '${r['isHashTarget'] == true ? '←哈希目标' : ''}')
+          .join(', ');
+
+  /// 把槽位明细逐条写进日志（往返验证用）
+  void logLayout(String prefix) {
+    if (resources.isEmpty) {
+      LogService.instance.write(
+        LogLevel.warn,
+        'verify',
+        '$prefix 无槽位明细（旧版原生侧不返回该字段）',
+      );
+      return;
+    }
+    LogService.instance.write(
+      LogLevel.info,
+      'verify',
+      '$prefix 共 ${resources.length} 个资源：$layoutLabel',
+    );
+    for (final r in resources) {
+      LogService.instance.write(
+        LogLevel.info,
+        'verify',
+        '$prefix   type(${r['typeRawValue']})/${r['typeName']}'
+        ' role=${r['role']} uti=${r['uti']} 文件=${r['filename']}'
+        '${r['isHashTarget'] == true ? '  ←本次哈希取的是这个' : ''}',
+      );
+    }
+  }
 
   /// 辅助资源（ProRAW 第二份/深度图/增益图）是否未备份
   List<String> get unbackedAuxiliary {
@@ -770,6 +814,11 @@ class AssetResourceHash {
       filename: (m['filename'] as String?) ?? '',
       resourceCount: (m['resourceCount'] as num?)?.toInt() ?? 0,
       resourceSummary: summary,
+      resources: (m['resources'] as List?)
+              ?.whereType<Map>()
+              .map((e) => e.map((k, v) => MapEntry('$k', v)))
+              .toList() ??
+          const [],
     );
   }
 }
