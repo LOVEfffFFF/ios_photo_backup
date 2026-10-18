@@ -981,7 +981,7 @@ class AssetEditingInfo {
       contentAdjustmentFormatVersion:
           '${raw['contentAdjustmentFormatVersion'] ?? ''}',
       contentAdjustmentUTI: '${raw['contentAdjustmentUTI'] ?? ''}',
-      isContentEditable: raw['isContentEditable'] == true,
+      isContentEditable: raw['canPerformEditingOperation'] == true,
       renderedImagePath: '${raw['renderedImagePath'] ?? ''}',
       renderedImageBytes: (raw['renderedImageBytes'] as num?)?.toInt() ?? 0,
       resourceCount: (raw['resourceCount'] as num?)?.toInt() ?? 0,

@@ -1113,7 +1113,10 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
                     "contentAdjustmentSha256": adjSha,
                     "contentAdjustmentFormat": adjFormat,
                     "contentAdjustmentFormatVersion": adjVersion,
-                    "isContentEditable": input?.isContentEditable ?? false,
+                    // 注意成员名：PHContentEditingInput 没有 isContentEditable，
+                    // 表示「能否继续编辑」的是 canPerformEditingOperation。
+                    "canPerformEditingOperation":
+                        input?.canPerformEditingOperation ?? false,
                     "renderedImagePath": fsURL?.path ?? "",
                     "renderedImageBytes": renderBytes,
                     "resourceCount": resources.count,
@@ -1135,7 +1138,7 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
                         "contentAdjustmentSha256": "",
                         "contentAdjustmentFormat": "",
                         "contentAdjustmentFormatVersion": "",
-                        "isContentEditable": false,
+                        "canPerformEditingOperation": false,
                         "renderedImagePath": "",
                         "renderedImageBytes": 0,
                         "resourceCount": resources.count,
