@@ -871,7 +871,15 @@ private func savePhotoWithExtras(call: FlutterMethodCall, result: @escaping Flut
             guard let p = item["path"] as? String,
                   FileManager.default.fileExists(atPath: p) else { continue }
             let kind = item["restoreType"] as? String ?? "alternate"
-            guard let t = Self.phAssetResourceType(forRestoreType: kind) else { continue }
+            guard let t = Self.phAssetResourceType(forRestoreType: kind) else {
+                // 以前是静默 `continue`：槽位不可用时资源凭空消失，
+                // 日志里连「少了谁」都查不到。编辑指令正在改投未验证的槽位
+                // (7 / 8)，这条日志就是唯一的观测点。
+                AppDelegate.appendLogLine(
+                    "[warn] 附加资源没有可用槽位，已跳过 kind=\(kind)"
+                    + " 文件=\(URL(fileURLWithPath: p).lastPathComponent)")
+                continue
+            }
             extras.append(Extra(type: t, url: URL(fileURLWithPath: p), kind: kind))
         }
     }
@@ -1057,20 +1065,19 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
     case "adjustmentEnvelope":
         // IMG_xxxxO.aae（apple-adjustment-envelope，iOS 16+ 的标准编辑数据封装）
         //
-        // **本次实验**：以前它和渲染图一起挤在 `.alternatePhoto`，一个槽只收
-        // 一个 → 滤镜必丢。改投公开枚举 `.adjustment` —— 这才是「编辑数据」
-        // 名副其实的槽位。原图里 `Adjustments.plist` 就待在 type(7)，
-        // 强烈暗示 `.adjustment` 就是 7。
+        // **不能用 `.adjustment`**：CI 实测 `reference to member 'adjustment'
+        // cannot be resolved without a contextual type` —— Swift 根本没把
+        // PHAssetResourceTypeAdjustment 导成枚举成员（`.poster`/`.alternateVideo`
+        // 同理）。所以只能按 rawValue 构造。
         //
-        // Swift 枚举来自 NS_ENUM，成员 rawValue 互不相同，因此 `.adjustment`
-        // 必定不等于 `.alternatePhoto`(实测 4)，**分槽在编译期就成立**，
-        // 不靠猜编号。到底 iOS 肯不肯收，由实跑验证（见 savePhotoWithExtras
-        // 的逐级降级：被拒就自动退回旧行为，不会比现在更糟）。
-        return .adjustment
+        // 为什么是 8：原图里 `Adjustments.plist` 待在 type(7)（实测），
+        // 说明 7 号槽 iOS 肯装编辑指令；`.aae` 是另一份、必须换槽，
+        // 8 是紧邻的下一个未知槽，属于试探。被拒就靠降级阶梯兜住。
+        return PHAssetResourceType(rawValue: 8)
     case "adjustmentPlist":
-        // Adjustments.plist（旧格式的编辑指令）。与 .aae 分槽，
-        // 否则两者自己先撞起来。去 `.adjustmentBase`（调整基图）。
-        return .adjustmentBase
+        // Adjustments.plist（旧格式编辑指令）→ 复刻原图的 type(7)。
+        // 这是唯一有实证支撑的槽位编号，不是猜的。
+        return PHAssetResourceType(rawValue: 7)
     case "pairedVideo":
         return .pairedVideo
     case "fullSizePhoto":
