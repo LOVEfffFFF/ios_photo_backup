@@ -1013,7 +1013,7 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
     ///   · `adjustmentData` —— iOS 自己的编辑指令（**权威来源**，比从资源里
     ///     抠出来的 Adjustments.plist 更可靠），能算字节数与 SHA256；
     ///   · `fullSizeImageURL` —— iOS 当前渲染出的成片；
-    ///   · `isContentEditable` —— 是否还能继续编辑。
+    ///   · 渲染成片的字节数（`fullSizeImageURL` 指向的那个文件）。
     ///
     /// ## 拿不到什么
     ///
@@ -1113,11 +1113,10 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
                     "contentAdjustmentSha256": adjSha,
                     "contentAdjustmentFormat": adjFormat,
                     "contentAdjustmentFormatVersion": adjVersion,
-                    // 注意成员名：PHContentEditingInput 没有 isContentEditable，
-                    // 表示「能否继续编辑」的是 canPerformEditingOperation。
-                    "canPerformEditingOperation":
-                        input?.canPerformEditingOperation ?? false,
-                    "renderedImagePath": fsURL?.path ?? "",
+                                        // 刻意不取「能否继续编辑」：该概念属于 PHAsset
+                                        // .canPerformEditingOperation，不在 PHContentEditingInput 上。
+                                        // 已因猜错成员名连续两次 CI 失败，不再猜。
+                                        "renderedImagePath": fsURL?.path ?? "",
                     "renderedImageBytes": renderBytes,
                     "resourceCount": resources.count,
                 ])
