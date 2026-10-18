@@ -482,11 +482,28 @@ class _ComparePageState extends State<ComparePage> {
             ? '${record.pixelWidth}×${record.pixelHeight}' == phone.sizeLabel
             : null,
       ),
-      _Row('媒体类型', record?.mediaType ?? '无对应记录', phone.typeLabel, null),
+      _Row(
+        '媒体类型',
+        record?.mediaType ?? '无对应记录',
+        phone.typeLabel,
+        // 之前写死 null，两边明明都是 image 却标「未记录」——
+        // 那一堆橙色叹号里混着真问题，看着像坏了，其实只是没判。
+        record != null ? record!.mediaType == phone.typeLabel : null,
+      ),
       _Row('拍摄模式', '未记录',
           phone.subtypes.isEmpty ? '（无特殊模式）' : phone.subtypes.join('、'), null),
-      _Row('文件构成', '（备份侧只存了 1 个文件）',
-          '${phone.resourceCount} 份资源', null),
+      _Row(
+        '文件构成',
+        // 原先这里硬编码「（备份侧只存了 1 个文件）」——那是 GAP-R1 修好之前
+        // 的状态（对比页只看得到主文件）。数据早就变成 4 个文件了，
+        // 文案和判定却没跟着改，于是把一份完整的备份显示成残缺。
+        record != null
+            ? '${record.backedResourceCount} 个文件'
+                  '${record.extraResources.isEmpty ? '' : '（主 1 + 附加 ${record.extraResources.length}）'}'
+            : '无对应记录',
+        '${phone.resourceCount} 份资源',
+        record != null ? record.backedResourceCount == phone.resourceCount : null,
+      ),
       _Row('原始文件名', '未记录',
           phone.originalFilename.isEmpty ? '（无）' : phone.originalFilename, null),
       _Row('收藏', '未记录', phone.isFavorite ? '是' : '否', null),
@@ -609,23 +626,70 @@ class _Row {
 }
 
 /// 从电脑清单（/manifest 返回的行）重建备份记录
+///
+/// ## 为什么这里也必须归并附加资源
+///
+/// 清单里一个资产会有多条：`main` / `pairedVideo` / `raw` / `adjustment` /
+/// `adjustmentAAE` / `render`。本实现原先只认 `pairedVideo`，
+/// 于是**每一条附加资源都被当成一个独立资产**——原图会被算成 4 个「照片」，
+/// 而且每条记录的 `extraResources` 都是空的。
+///
+/// 平时走不到这条路（`_loadRecords` 优先用手机本地记录），但它正是
+/// 「手机沙盒丢了、只剩电脑清单」时的救命通道。真走到那时，
+/// 恢复只会下载主文件，DNG 之外的渲染图与编辑指令全部悄悄消失 ——
+/// 也就是 GAP-R1 要治的那个病，换个入口复发。
 class ManifestRecords {
   static List<BackupRecord> fromManifest(List<Map<String, dynamic>> raw) {
     final pairedByKey = <String, String>{};
+    // 附加资源按 pairKey 归组，找不到 pairKey 的退回 assetId
+    final extrasByKey = <String, List<BackupResource>>{};
+
+    String keyOf(Map<String, dynamic> e) {
+      final k = e['pairKey'] as String? ?? '';
+      if (k.isNotEmpty) return k;
+      return e['assetId'] as String? ?? '';
+    }
+
+    bool isMain(Map<String, dynamic> e) {
+      final r = e['role'] as String? ?? 'main';
+      return r.isEmpty || r == 'main';
+    }
+
     for (final e in raw) {
       final key = e['pairKey'] as String? ?? '';
-      if (e['role'] == 'pairedVideo' && key.isNotEmpty) {
+      final role = e['role'] as String? ?? 'main';
+      if (role == 'pairedVideo' && key.isNotEmpty) {
         pairedByKey[key] = e['serverPath'] as String? ?? '';
+        continue;
       }
+      if (isMain(e)) continue;
+      final k = keyOf(e);
+      if (k.isEmpty) continue;
+      (extrasByKey[k] ??= <BackupResource>[]).add(BackupResource(
+        role: role,
+        relativePath: e['serverPath'] as String? ?? '',
+        sha256: e['clientSha256'] as String? ?? '',
+        bytes: (e['size'] as num?)?.toInt() ?? 0,
+        uti: e['uti'] as String? ?? '',
+        filename: e['originalFilename'] as String? ?? '',
+      ));
     }
+
     final out = <BackupRecord>[];
     for (final e in raw) {
       if (e['role'] == 'pairedVideo') continue;
+      if (!isMain(e)) continue;
       final ts = (e['createdUnix'] as num?)?.toDouble() ?? 0;
       final ms = (ts * 1000).round();
       final key = e['pairKey'] as String? ?? '';
+      final assetId = e['assetId'] as String? ?? '';
+      final extras = <BackupResource>[
+        if (key.isNotEmpty) ...(extrasByKey[key] ?? const <BackupResource>[]),
+        if (assetId != key)
+          ...(extrasByKey[assetId] ?? const <BackupResource>[]),
+      ];
       out.add(BackupRecord(
-        localIdentifier: e['assetId'] as String? ?? '',
+        localIdentifier: assetId,
         relativePath: e['serverPath'] as String? ?? '',
         creationDate:
             DateTime.fromMillisecondsSinceEpoch(ms, isUtc: true).toLocal(),
@@ -634,6 +698,9 @@ class ManifestRecords {
         livePhotoVideoRelativePath: key.isEmpty ? null : pairedByKey[key],
         pixelWidth: (e['pixelWidth'] as num?)?.toInt(),
         pixelHeight: (e['pixelHeight'] as num?)?.toInt(),
+        contentSha256: e['clientSha256'] as String? ?? '',
+        resourceTotal: (e['resourceTotal'] as num?)?.toInt(),
+        extraResources: extras,
       ));
     }
     return out;
