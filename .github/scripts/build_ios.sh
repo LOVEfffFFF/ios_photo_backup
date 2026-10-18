@@ -27,7 +27,11 @@ esac
 
 echo "=== 步骤 1/3：生成 Flutter 配置（${CONFIG}）==="
 # --config-only 只生成 iOS 工程配置，不编译、不校验 Team
-flutter build ios --config-only --no-codesign
+# BUILD_TAG 注入真实构建时间，AppInfo.build 读它显示版本号。
+# 这样每次流水线构建出来的包版本号天然不同 —— 侧载没有升级提示，
+# 版本号是判断「装的到底是哪一版」最直接的一手证据。
+flutter build ios --config-only --no-codesign \
+  --dart-define=BUILD_TAG="$(date '+%Y-%m-%d-%H:%M')"
 
 echo "=== 步骤 2/3：xcodebuild 编译（显式关闭签名）==="
 # 删掉 Podfile 后项目走 Swift Package Manager，可能只有 .xcodeproj；
