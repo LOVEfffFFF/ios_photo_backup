@@ -279,6 +279,47 @@ class PhotoLibraryHelper {
     }
   }
 
+  /// 读取照片的完整信息（真读每个资源的字节，不是查属性）
+  ///
+  /// 比 [getAssetDetail] 慢得多：ProRAW 资产要流式读完 70MB DNG。
+  /// 适合用户主动点开详情页看，**不适合放进备份主流程**。
+  static Future<AssetFullInfo?> getAssetFullInfo(String localIdentifier) async {
+    if (localIdentifier.isEmpty) return null;
+    try {
+      final raw = await _channel.invokeMethod('getAssetFullInfo', {
+        'localIdentifier': localIdentifier,
+        'hexLimit': 512,
+        'inlineLimit': 65536,
+      });
+      if (raw is! Map) return null;
+      final err = raw['error'] as String?;
+      if (err != null && err.isNotEmpty) {
+        LogService.instance.write(
+          LogLevel.warn,
+          'detail',
+          '读取照片详情失败 [$localIdentifier]: $err',
+        );
+        return null;
+      }
+      final info = AssetFullInfo.fromChannel(raw.cast<String, dynamic>());
+      LogService.instance.write(
+        LogLevel.info,
+        'detail',
+        '照片详情 [$localIdentifier] 资源 ${info.resourceCount} 个'
+        ' 合计 ${info.totalBytes} 字节'
+        ' 编辑指令 ${info.adjustmentResources.length} 个',
+      );
+      return info;
+    } catch (e) {
+      LogService.instance.write(
+        LogLevel.error,
+        'detail',
+        '读取照片详情异常 [$localIdentifier]: $e',
+      );
+      return null;
+    }
+  }
+
   /// 把编辑分析结果逐条写进日志
   static void logEditingInfo(String prefix, AssetEditingInfo? info) {
     if (info == null) {
@@ -1056,3 +1097,177 @@ class SaveWithExtrasResult {
   bool get ok => assetId.isNotEmpty;
 
 }
+
+/// 照片详情页的数据：一个资产的**全量**原生信息
+///
+/// ## 为什么要单独一个模型
+///
+/// 现有的导出诊断里，每个资源的 `bytes` 恒为 0 ——
+/// `PHAssetResource` 没有公开的文件大小属性，之前用 KVC 取 `fileSize`
+/// 会抛 Objective-C 异常直接闪退，于是干脆留 0。
+/// 结果是详情页一直显示「0 字节」，**看着像资源是空的，其实从没读过内容**。
+///
+/// [AssetFullInfo.resources] 是真的用 `requestData` 读回来的：
+/// 字节数、SHA256 都在同一次读取里算掉，编辑类资源还额外带
+/// 十六进制与 base64 —— 编辑指令是 Apple 私有二进制，不摊开字节
+/// 就永远只能看到一个数字，无从判断「到底读到了没有」。
+class AssetFullInfo {
+  const AssetFullInfo({
+    required this.localIdentifier,
+    required this.creationDate,
+    required this.modificationDate,
+    required this.pixelWidth,
+    required this.pixelHeight,
+    required this.mediaType,
+    required this.duration,
+    required this.isFavorite,
+    required this.isHidden,
+    required this.originalFilename,
+    required this.subtypes,
+    required this.hasLocation,
+    required this.latitude,
+    required this.longitude,
+    required this.formatDescriptions,
+    required this.resources,
+    required this.editing,
+  });
+
+  final String localIdentifier;
+  final double creationDate;
+  final double modificationDate;
+  final int pixelWidth;
+  final int pixelHeight;
+  final String mediaType;
+  final double duration;
+  final bool isFavorite;
+  final bool isHidden;
+  final String originalFilename;
+
+  /// 媒体子类型（Live Photo / HDR / 人像 / RAW…）
+  final List<String> subtypes;
+
+  final bool hasLocation;
+  final double latitude;
+  final double longitude;
+  final List<String> formatDescriptions;
+
+  /// 逐个真读一遍的资源明细，见 [AssetResourceDetail]
+  final List<AssetResourceDetail> resources;
+
+  /// iOS 自己的编辑信息（`PHContentEditingInput` 那一份）
+  final Map<String, dynamic> editing;
+
+  int get resourceCount => resources.length;
+
+  /// 所有编辑类资源（按 UTI 判定，不靠 type 编号）
+  List<AssetResourceDetail> get adjustmentResources => resources
+      .where((r) =>
+          r.uti.contains('adjustment') ||
+          r.uti.contains('property-list') ||
+          r.filename.endsWith('.aae'))
+      .toList();
+
+  /// 整个资产一共多少字节（所有资源相加）
+  int get totalBytes =>
+      resources.fold<int>(0, (sum, r) => sum + r.bytes);
+
+  factory AssetFullInfo.fromChannel(Map<String, dynamic> raw) {
+    List<Map<String, dynamic>> rows() =>
+        ((raw['resources'] as List?) ?? const [])
+            .whereType<Map<String, dynamic>>()
+            .toList();
+    return AssetFullInfo(
+      localIdentifier: '${raw['localIdentifier'] ?? ''}',
+      creationDate: (raw['creationDate'] as num?)?.toDouble() ?? 0,
+      modificationDate: (raw['modificationDate'] as num?)?.toDouble() ?? 0,
+      pixelWidth: (raw['pixelWidth'] as num?)?.toInt() ?? 0,
+      pixelHeight: (raw['pixelHeight'] as num?)?.toInt() ?? 0,
+      mediaType: '${raw['mediaType'] ?? ''}',
+      duration: (raw['duration'] as num?)?.toDouble() ?? 0,
+      isFavorite: raw['isFavorite'] == true,
+      isHidden: raw['isHidden'] == true,
+      originalFilename: '${raw['originalFilename'] ?? ''}',
+      subtypes:
+          ((raw['subtypes'] as List?) ?? const []).map((e) => '$e').toList(),
+      hasLocation: raw['hasLocation'] == true,
+      latitude: (raw['latitude'] as num?)?.toDouble() ?? 0,
+      longitude: (raw['longitude'] as num?)?.toDouble() ?? 0,
+      formatDescriptions: ((raw['formatDescriptions'] as List?) ?? const [])
+          .map((e) => '$e')
+          .toList(),
+      resources: rows().map(AssetResourceDetail.fromChannel).toList(),
+      editing: (raw['editing'] as Map?)?.cast<String, dynamic>() ?? {},
+    );
+  }
+}
+
+/// 照片详情页里的单个资源
+class AssetResourceDetail {
+  const AssetResourceDetail({
+    required this.index,
+    required this.typeRawValue,
+    required this.typeName,
+    required this.uti,
+    required this.filename,
+    required this.bytes,
+    required this.sha256,
+    required this.error,
+    this.hex = '',
+    this.base64 = '',
+    this.inlineTruncated = false,
+  });
+
+  final int index;
+
+  /// `PHAssetResourceType.rawValue` —— **不要**据此推断语义，见 [typeName]
+  final int typeRawValue;
+
+  /// 编号到名字的映射。注意 4 / 5 是实测值，其余未验证
+  final String typeName;
+
+  final String uti;
+  final String filename;
+
+  /// 真实字节数（`requestData` 流式累加得来的）
+  final int bytes;
+
+  final String sha256;
+
+  /// 读取失败时的系统描述
+  final String error;
+
+  /// 前若干字节的十六进制转储（仅小资源有）
+  final String hex;
+
+  /// 原始字节的 base64（仅小资源有，可完整还原）
+  final String base64;
+
+  /// 内容是否被截断（[base64] 只含前若干字节）
+  final bool inlineTruncated;
+
+  bool get failed => error.isNotEmpty;
+
+  /// 是否是编辑指令类资源（决定该往哪个槽位写）
+  bool get isAdjustment =>
+      uti.contains('adjustment') ||
+      uti.contains('property-list') ||
+      filename.endsWith('.aae');
+
+  factory AssetResourceDetail.fromChannel(Map<String, dynamic> raw) =>
+      AssetResourceDetail(
+        index: (raw['index'] as num?)?.toInt() ?? 0,
+        typeRawValue: (raw['typeRawValue'] as num?)?.toInt() ?? -1,
+        typeName: '${raw['typeName'] ?? ''}',
+        uti: '${raw['uti'] ?? ''}',
+        filename: '${raw['filename'] ?? ''}',
+        bytes: (raw['bytes'] as num?)?.toInt() ?? 0,
+        sha256: '${raw['sha256'] ?? ''}',
+        error: '${raw['error'] ?? ''}',
+        hex: '${raw['hex'] ?? ''}',
+        base64: '${raw['base64'] ?? ''}',
+        inlineTruncated: raw['inlineTruncated'] == true,
+      );
+}
+
+// 注：`getAssetFullInfo` 的实现放在 PhotoLibraryHelper 类内（要访问私有
+// `_channel`）。`AssetFullInfo` / `AssetResourceDetail` 作为顶层类放这里没问题。

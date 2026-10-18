@@ -13,6 +13,7 @@ import '../models/backup_resource.dart';
 import '../services/log_service.dart';
 import '../services/server_client.dart';
 import '../services/server_config.dart';
+import 'asset_detail_page.dart';
 
 /// 备份信息对比页
 ///
@@ -392,6 +393,20 @@ class _ComparePageState extends State<ComparePage> {
                   )
                 : const Icon(Icons.cloud_upload),
             tooltip: '导出对比结果到电脑',
+          ),
+          IconButton(
+            onPressed: _picked == null
+                ? null
+                : () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => AssetDetailPage(
+                          localIdentifier: _picked!.localIdentifier,
+                          title: _picked!.relativePath.split('/').last,
+                        ),
+                      ),
+                    ),
+            icon: const Icon(Icons.fact_check_outlined),
+            tooltip: '照片详情：逐个真读资源，看清到底备份了什么',
           ),
           IconButton(
             onPressed: _loadRecords,

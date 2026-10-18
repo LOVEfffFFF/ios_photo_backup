@@ -287,6 +287,8 @@ private func photoBackupSignalHandler(_ sig: Int32) {
             hashAssetResources(call: call, result: result)
         case "analyzeAssetEditing":
             analyzeAssetEditing(call: call, result: result)
+        case "getAssetFullInfo":
+            getAssetFullInfo(call: call, result: result)
         case "deleteAssets":
             deleteAssets(call: call, result: result)
         case "savePhotoWithExtras":
@@ -1097,6 +1099,190 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
         return .alternatePhoto
     }
 }
+
+// MARK: - 照片详情（全量信息 + 资源真实字节）
+
+    /// 读取一个资产的**全部**原生信息，供「照片详情」窗口展示。
+    ///
+    /// ## 为什么不能直接复用导出诊断里的 resources
+    ///
+    /// 那份明细的 `fileSize` 恒为 0 —— `PHAssetResource` 没有公开的文件大小
+    /// 属性，之前试过 KVC 取 `fileSize`，key 不存在时抛 Objective-C 异常直接
+    /// 闪退。于是详情页长期显示「0 字节」，看着像资源是空的，
+    /// 其实**从来没读过内容**。要真正读出照片信息只能自己读一遍。
+    ///
+    /// 这里对每个资源跑一次 `requestData(for:)`：
+    ///   · 字节数（流式累加，不把大文件整个塞内存）
+    ///   · SHA256（同一次读取顺带算掉，不额外再读一遍）
+    ///   · 小资源的十六进制 + base64 —— 编辑指令是 Apple 私有二进制，
+    ///     不把字节摊开就永远只能看到一个「0 字节」，无从判断信息读到了没有
+    ///
+    /// ## 为什么顺序读而不是并发
+    ///
+    /// 一个 ProRAW 资产是 70MB DNG + 8MB 渲染图 + 编辑指令。并发读快一点，
+    /// 但要处理回调顺序、共享状态同步、单个资源失败不牵连其他…
+    /// 收益抵不上风险。详情页是人主动点开的，等几秒可以接受。
+    private func getAssetFullInfo(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let args = call.arguments as? [String: Any],
+              let localIdentifier = args["localIdentifier"] as? String else {
+            result(["error": "参数不完整"])
+            return
+        }
+        let hexLimit = (args["hexLimit"] as? num)?.toInt() ?? 512
+        // 超过这个大小就不往通道里塞内容了（通道不是传文件的通道）
+        let inlineLimit = (args["inlineLimit"] as? num)?.toInt() ?? 65536
+
+        let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil)
+        guard let asset = fetch.firstObject else {
+            result(["error": "找不到该资产，可能已从相册删除"])
+            return
+        }
+
+        let resources = PHAssetResource.assetResources(for: asset)
+        let options = PHAssetResourceRequestOptions()
+        options.isNetworkAccessAllowed = true
+
+        var rows: [[String: Any]] = []
+        var index = 0
+
+        func readNext() {
+            guard index < resources.count else {
+                // escaping 闭包里引用实例方法必须显式 self（局部函数也算闭包）
+                self.readEditingInfo(asset) { editing in
+                    let out: [String: Any] = [
+                        "localIdentifier": asset.localIdentifier,
+                        "creationDate": asset.creationDate?.timeIntervalSince1970 ?? 0,
+                        "modificationDate": asset.modificationDate?.timeIntervalSince1970 ?? 0,
+                        "pixelWidth": asset.pixelWidth,
+                        "pixelHeight": asset.pixelHeight,
+                        "mediaType": self.mediaTypeString(asset.mediaType),
+                        "duration": asset.duration,
+                        "isFavorite": asset.isFavorite,
+                        "isHidden": asset.isHidden,
+                        "originalFilename": Self.safeKVC(asset, "originalFilename") as? String ?? "",
+                        "subtypes": Self.subtypeNames(asset),
+                        "hasLocation": asset.location != nil,
+                        "latitude": asset.location?.coordinate.latitude ?? 0,
+                        "longitude": asset.location?.coordinate.longitude ?? 0,
+                        "formatDescriptions":
+                            (Self.safeKVC(asset, "formatDescriptions") as? [String]) ?? [],
+                        "resourceCount": resources.count,
+                        "resources": rows,
+                        "editing": editing,
+                    ]
+                    DispatchQueue.main.async { result(out) }
+                }
+                return
+            }
+
+            let r = resources[index]
+            index += 1
+            var hasher = SHA256()
+            var total = 0
+            var head = Data() // 只保留前 inlineLimit 字节
+
+            PHAssetResourceManager.default().requestData(
+                for: r,
+                options: options,
+                dataReceivedHandler: { data in
+                    hasher.update(data: data)
+                    total += data.count
+                    if head.count < inlineLimit {
+                        head.append(data.prefix(inlineLimit - head.count))
+                    }
+                },
+                completionHandler: { error in
+                    var row: [String: Any] = [
+                        "index": index - 1,
+                        "typeRawValue": Int(r.type.rawValue),
+                        "typeName": Self.resourceTypeName(r.type.rawValue),
+                        "uti": r.uniformTypeIdentifier,
+                        "filename": r.originalFilename,
+                        "bytes": total,
+                        "sha256": hasher.finalize()
+                            .map { String(format: "%02x", $0) }.joined(),
+                        "error": error?.localizedDescription ?? "",
+                    ]
+                    if head.count > 0 {
+                        row["hex"] = Self.hexDump(head, limit: hexLimit)
+                        row["base64"] = head.base64EncodedString()
+                        row["inlineTruncated"] = total > head.count
+                    }
+                    rows.append(row)
+                    readNext()
+                }
+            )
+        }
+
+        readNext()
+    }
+
+    /// 取编辑（滤镜/风格）信息：iOS 自己的 `adjustmentData`
+    ///
+    /// 实测这张 ProRAW **回调成功但 `adjustmentData` 为 nil**，尽管资源里明明
+    /// 挂着 `Adjustments.plist` 与 `.aae` 两个编辑类文件。所以这个字段为 nil
+    /// 本身不代表「没有编辑」——详情页要把两者分开列，别混为一谈。
+    private func readEditingInfo(_ asset: PHAsset, completion: @escaping ([String: Any]) -> Void) {
+        asset.requestContentEditingInput(
+            with: PHContentEditingInputRequestOptions()
+        ) { input, _ in
+            var out: [String: Any] = [
+                "renderedBytes": Self.fileSize(at: input?.fullSizeImageURL),
+                "hasAdjustmentData": false,
+            ]
+            if let adj = input?.adjustmentData {
+                var h = SHA256()
+                h.update(data: adj.data)
+                out["hasAdjustmentData"] = true
+                out["adjustmentBytes"] = adj.data.count
+                out["adjustmentSha256"] = h.finalize()
+                    .map { String(format: "%02x", $0) }.joined()
+                out["adjustmentFormat"] = adj.formatIdentifier
+                out["adjustmentVersion"] = adj.formatVersion
+            }
+            DispatchQueue.main.async { completion(out) }
+        }
+    }
+
+    /// 把字节摊成可读的十六进制
+    ///
+    /// 每行 16 字节、行首带偏移量、右侧附 ASCII —— 没有偏移量就没法对照
+    /// 二进制结构逐段看，ASCII 列则能一眼看出里面有没有可读字符串。
+    private static func hexDump(_ data: Data, limit: Int) -> String {
+        let bytes = [UInt8](data)
+        let n = min(bytes.count, limit)
+        var out = ""
+        var i = 0
+        while i < n {
+            let end = min(i + 16, n)
+            out += String(format: "%08x  ", i)
+            var line = ""
+            for j in i..<end { line += String(format: "%02x ", bytes[j]) }
+            while line.count < 16 * 3 { line += " " }
+            var ascii = ""
+            for j in i..<end {
+                let b = bytes[j]
+                if b >= 0x20 && b < 0x7f {
+                    ascii.append(Character(UnicodeScalar(b) ?? UnicodeScalar(63)))
+                } else {
+                    ascii.append(".")
+                }
+            }
+            out += line + " |" + ascii + "|\n"
+            i = end
+        }
+        if bytes.count > limit {
+            out += "…（共 \(bytes.count) 字节，仅显示前 \(limit)）"
+        }
+        return out
+    }
+
+    /// 文件字节数；拿不到就 0（不猜、不报错）
+    private static func fileSize(at url: URL?) -> Int {
+        guard let url = url else { return 0 }
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return (attrs?[.size] as? NSNumber)?.intValue ?? 0
+    }
 
 // MARK: - 分析资产的编辑信息
 
