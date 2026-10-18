@@ -1062,22 +1062,27 @@ private func savePhotoWithExtras(call: FlutterMethodCall, result: @escaping Flut
 /// 所以 render 必须走 `.alternatePhoto`，见 `BackupResource.restoreType`。
 private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetResourceType? {
     switch kind {
-    case "adjustmentEnvelope":
-        // IMG_xxxxO.aae（apple-adjustment-envelope，iOS 16+ 的标准编辑数据封装）
+    case "adjustmentEnvelope", "adjustmentPlist":
+        // Adjustments.plist / .aae —— 编辑指令与数据。
         //
-        // **不能用 `.adjustment`**：CI 实测 `reference to member 'adjustment'
-        // cannot be resolved without a contextual type` —— Swift 根本没把
-        // PHAssetResourceTypeAdjustment 导成枚举成员（`.poster`/`.alternateVideo`
-        // 同理）。所以只能按 rawValue 构造。
+        // ## 这里踩过「黑图」，别再动
         //
-        // 为什么是 8：原图里 `Adjustments.plist` 待在 type(7)（实测），
-        // 说明 7 号槽 iOS 肯装编辑指令；`.aae` 是另一份、必须换槽，
-        // 8 是紧邻的下一个未知槽，属于试探。被拒就靠降级阶梯兜住。
-        return PHAssetResourceType(rawValue: 8)
-    case "adjustmentPlist":
-        // Adjustments.plist（旧格式编辑指令）→ 复刻原图的 type(7)。
-        // 这是唯一有实证支撑的槽位编号，不是猜的。
-        return PHAssetResourceType(rawValue: 7)
+        // 2026-10-19 实测：把它们改投 `PHAssetResourceType(rawValue: 7)`
+        // （原图里 `Adjustments.plist` 确实待在 7），**iOS 会收下**——
+        // 副本里真的出现了 `type(7)]Adjustments.plist`，写入结果 written=2。
+        //
+        // 然后副本**渲染成黑图**。原因：7 号槽里的编辑指令与渲染基图
+        // （`FullSizeRender.jpg`）是绑定关系，iOS 拿指令去找基图，
+        // 而我们把渲染图放进了 `.alternatePhoto`（写 `.fullSizePhoto` 会被 3300 拒），
+        // 基图对不上 → 渲染失败 → 黑图。
+        //
+        // 所以铁律是：**编辑指令不能单独硬塞槽位**。
+        // 能写进去 ≠ 能正确应用，写错的表现不是「丢滤镜」而是「内容损坏」，
+        // 后者严重得多。宁可让编辑指令被去重舍弃，也不能写出黑图。
+        //
+        // 因此这里维持 `.alternatePhoto`：与渲染图撞槽后由写入前的去重逻辑
+        // 主动舍弃，副本退化成「DNG + 渲染图」——滤镜丢失，但图是好的。
+        return .alternatePhoto
     case "pairedVideo":
         return .pairedVideo
     case "fullSizePhoto":
