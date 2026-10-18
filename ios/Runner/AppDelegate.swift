@@ -1003,65 +1003,7 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
     }
 }
 
-// MARK: - 往返验证：清理验证副本
-
-/// 删除指定的资产（仅用于清理「往返验证」创建的副本）
-///
-/// ## 安全约束
-/// 这是**删除相册照片**的能力，风险最高，因此刻意做成最窄的口子：
-///   · 必须显式传 confirm=true 才执行，否则直接拒绝
-///   · 只删调用方给出的 ID 列表，不做任何"顺便清理"
-///   · 删完回传每个 ID 的成功/失败，让 UI 如实展示
-///
-/// 调用方（VerifyManager）只会传入本次验证自己创建、且记录在
-/// restoredAssetIds 里的 ID —— 绝不涉及用户原有照片。
-private func deleteAssets(call: FlutterMethodCall, result: @escaping FlutterResult) {
-    guard let args = call.arguments as? [String: Any],
-          args["confirm"] as? Bool == true else {
-        result(["error": "必须显式确认（confirm=true）才会执行删除"])
-        return
-    }
-    let ids = args["localIdentifiers"] as? [String] ?? []
-    // 空列表直接拒绝：避免"删了 0 个"被误当成成功
-    guard !ids.isEmpty else {
-        result(["error": "没有要删除的资产 ID"])
-        return
-    }
-
-    PHPhotoLibrary.requestAuthorization { status in
-        guard self.isPhotoLibraryAccessGranted(status) else {
-            DispatchQueue.main.async { result(["error": "没有相册访问权限"]) }
-            return
-        }
-        var ok = 0
-        var failed = 0
-        // 逐个删：PHPhotoLibrary 的 performChanges 不支持按 ID 批量删
-        for id in ids {
-            let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil)
-            guard let asset = fetch.firstObject else {
-                failed += 1
-                continue
-            }
-            var done = false
-            PHPhotoLibrary.shared().performChanges({
-                PHAssetChangeRequest.deleteAssets([asset] as NSArray)
-            }, completionHandler: { success, _ in
-                if success { ok += 1 } else { failed += 1 }
-                done = true
-            })
-            // performChanges 是异步的，这里等它完成再进行下一个，
-            // 避免并发 performChanges 造成不确定行为
-            let deadline = Date().addingTimeInterval(10)
-            while !done && Date() < deadline {
-                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
-            }
-        }
-        DispatchQueue.main.async {
-            result(["deleted": ok, "failed": failed])
-        }
-    }
-
-    // MARK: - 分析资产的编辑信息
+// MARK: - 分析资产的编辑信息
 
     /// 分析某个资产的**编辑（滤镜/风格）状态**，供 Dart 侧展示与比对。
     ///
@@ -1078,7 +1020,8 @@ private func deleteAssets(call: FlutterMethodCall, result: @escaping FlutterResu
     /// **滤镜名称**。Apple 从不公开 `adjustmentData` 的内部结构
     /// （实测一个套了风格的 ProRAW 是 232 字节高熵二进制，无字符串、无可辨结构），
     /// 所以「鲜艳/暖色/纪实」这类名字无法由程序读出，只能由用户在编辑界面看。
-    /// 想确认名字就用 `restoreType` 那条路：比对 adjustmentData 的 SHA256。
+    /// 想知道滤镜对不对，就比对 adjustmentData 的 SHA256：
+    /// 一致说明我们的链路没丢数据，若显示仍不同则是 iOS 不认那个槽位。
     ///
     /// ## 注意：可能不回调
     ///
@@ -1151,7 +1094,6 @@ private func deleteAssets(call: FlutterMethodCall, result: @escaping FlutterResu
 
                 send([
                     "assetId": asset.localIdentifier,
-                    // 有没有编辑：相册里挂了编辑资源，或 adjustmentData 非空
                     "hasAdjustments": !adjResources.isEmpty || adjBytes > 0,
                     "adjustmentResourceCount": adjResources.count,
                     "adjustmentResources": adjResources,
@@ -1185,6 +1127,64 @@ private func deleteAssets(call: FlutterMethodCall, result: @escaping FlutterResu
                     ])
                 }
             }
+        }
+    }
+
+    // MARK: - 往返验证：清理验证副本
+
+/// 删除指定的资产（仅用于清理「往返验证」创建的副本）
+///
+/// ## 安全约束
+/// 这是**删除相册照片**的能力，风险最高，因此刻意做成最窄的口子：
+///   · 必须显式传 confirm=true 才执行，否则直接拒绝
+///   · 只删调用方给出的 ID 列表，不做任何"顺便清理"
+///   · 删完回传每个 ID 的成功/失败，让 UI 如实展示
+///
+/// 调用方（VerifyManager）只会传入本次验证自己创建、且记录在
+/// restoredAssetIds 里的 ID —— 绝不涉及用户原有照片。
+private func deleteAssets(call: FlutterMethodCall, result: @escaping FlutterResult) {
+    guard let args = call.arguments as? [String: Any],
+          args["confirm"] as? Bool == true else {
+        result(["error": "必须显式确认（confirm=true）才会执行删除"])
+        return
+    }
+    let ids = args["localIdentifiers"] as? [String] ?? []
+    // 空列表直接拒绝：避免"删了 0 个"被误当成成功
+    guard !ids.isEmpty else {
+        result(["error": "没有要删除的资产 ID"])
+        return
+    }
+
+    PHPhotoLibrary.requestAuthorization { status in
+        guard self.isPhotoLibraryAccessGranted(status) else {
+            DispatchQueue.main.async { result(["error": "没有相册访问权限"]) }
+            return
+        }
+        var ok = 0
+        var failed = 0
+        // 逐个删：PHPhotoLibrary 的 performChanges 不支持按 ID 批量删
+        for id in ids {
+            let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil)
+            guard let asset = fetch.firstObject else {
+                failed += 1
+                continue
+            }
+            var done = false
+            PHPhotoLibrary.shared().performChanges({
+                PHAssetChangeRequest.deleteAssets([asset] as NSArray)
+            }, completionHandler: { success, _ in
+                if success { ok += 1 } else { failed += 1 }
+                done = true
+            })
+            // performChanges 是异步的，这里等它完成再进行下一个，
+            // 避免并发 performChanges 造成不确定行为
+            let deadline = Date().addingTimeInterval(10)
+            while !done && Date() < deadline {
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+            }
+        }
+        DispatchQueue.main.async {
+            result(["deleted": ok, "failed": failed])
         }
     }
 }
