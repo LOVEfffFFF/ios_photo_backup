@@ -293,7 +293,6 @@ class _ComparePageState extends State<ComparePage> {
               '${ed.timedOut ? "（原生侧超时，值为 0 不可信）" : ""}');
           sb.writeln('    编辑指令哈希: '
               '${ed.contentAdjustmentSha256.isEmpty ? "(无)" : ed.contentAdjustmentSha256}');
-          sb.writeln('    可再编辑: ${ed.isContentEditable ? "是" : "否"}');
           sb.writeln('    渲染成片: ${ed.renderedImageBytes} 字节');
           sb.writeln('    ⚠ 滤镜名称程序读不出来（adjustmentData 是 Apple 私有格式），'
               '要确认滤镜名请在照片编辑界面看');

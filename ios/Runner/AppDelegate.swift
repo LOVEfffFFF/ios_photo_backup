@@ -1138,7 +1138,6 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
                         "contentAdjustmentSha256": "",
                         "contentAdjustmentFormat": "",
                         "contentAdjustmentFormatVersion": "",
-                        "canPerformEditingOperation": false,
                         "renderedImagePath": "",
                         "renderedImageBytes": 0,
                         "resourceCount": resources.count,

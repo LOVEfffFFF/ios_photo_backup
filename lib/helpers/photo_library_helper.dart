@@ -292,7 +292,7 @@ class PhotoLibraryHelper {
     LogService.instance.write(
       LogLevel.info,
       'edit',
-      '$prefix ${info.summary} 可再编辑=${info.isContentEditable}'
+      '$prefix ${info.summary}'
       ' 渲染图=${info.renderedImageBytes}B 资源数=${info.resourceCount}'
       '${info.timedOut ? " [超时]" : ""}',
     );
@@ -935,6 +935,11 @@ class AssetEditingInfo {
   /// iOS 建议的导出 UTI —— 判断「该用哪个槽位写回」的关键线索
   final String contentAdjustmentUTI;
 
+  /// 「能否继续编辑」—— **原生侧目前不提供，恒为 false**
+  ///
+  /// 「可编辑」这个概念属于 `PHAsset.canPerformEditingOperation`，
+  /// 不在 `PHContentEditingInput` 上；为了不再猜成员名（已因此失败两次 CI），
+  /// 干脆不取。判断恢复质量用 [contentAdjustmentSha256] 就够。
   final bool isContentEditable;
 
   /// iOS 当前渲染出的成片
