@@ -1084,17 +1084,17 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
                 var adjSha = ""
                 var adjFormat = ""
                 var adjVersion = ""
-                var adjUTI = ""
                 if let adj = input?.adjustmentData {
                     adjBytes = adj.data.count
-                    let h = SHA256()
+                    var h = SHA256()
                     h.update(data: adj.data)
                     adjSha = h.finalize()
                         .map { String(format: "%02x", $0) }.joined()
-                    // 这三项是判断「iOS 认不认我们写的槽位」的关键线索
+                    // PHAdjustmentData 只有这四个成员：
+                    // data / formatIdentifier / formatVersion / adjustmentTimestamp。
+                    // 注意它**没有** exportedUniformTypeIdentifier，别写上去。
                     adjFormat = adj.formatIdentifier
                     adjVersion = adj.formatVersion
-                    adjUTI = adj.exportedUniformTypeIdentifier
                 }
 
                 let fsURL = input?.fullSizeImageURL
@@ -1113,7 +1113,6 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
                     "contentAdjustmentSha256": adjSha,
                     "contentAdjustmentFormat": adjFormat,
                     "contentAdjustmentFormatVersion": adjVersion,
-                    "contentAdjustmentUTI": adjUTI,
                     "isContentEditable": input?.isContentEditable ?? false,
                     "renderedImagePath": fsURL?.path ?? "",
                     "renderedImageBytes": renderBytes,
@@ -1136,7 +1135,6 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
                         "contentAdjustmentSha256": "",
                         "contentAdjustmentFormat": "",
                         "contentAdjustmentFormatVersion": "",
-                        "contentAdjustmentUTI": "",
                         "isContentEditable": false,
                         "renderedImagePath": "",
                         "renderedImageBytes": 0,
