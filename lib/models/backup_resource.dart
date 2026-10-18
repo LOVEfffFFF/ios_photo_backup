@@ -88,10 +88,24 @@ class BackupResource {
       case 'render':
         // ProRAW 的渲染图（FullSizeRender.jpg）
         //
-        // 语义是「这张照片的完整渲染版本」，.fullSizePhoto 最贴近。
-        // 关键：绝不能落到 .alternatePhoto —— 那里要和两份编辑指令抢同一个槽位，
-        // iOS 只收一个，滤镜就丢了。
-        return 'fullSizePhoto';
+        // ## 写哪个槽位：实测只有 .alternatePhoto 收得下JPEG
+        //
+        // 实测（2026-10-18，build 23:31 往返验证，逐次尝试的原文）：
+        //   · `.alternatePhoto`（实测 rawValue **4**）写 JPEG → ✓ 写入成功
+        //   · `.fullSizePhoto`（实测 rawValue **5**）写 JPEG   → ✗ PHPhotosErrorDomain **3300**
+        //     连「DNG 走 .photo + JPEG 走 .fullSizePhoto」这种最朴素的两件套
+        //     都整批失败，降级到「只写主文件」才成功 —— 副本只剩 1 个资源，
+        //     比不写还糟。推测 iOS 要求 fullSizePhoto 槽与 photo 槽同源同格式，
+        //     塞一张 JPEG 进去与 DNG 打架。
+        //
+        // **踩过一次的坑**：曾把这里写成 'fullSizePhoto'（语义上「完整尺寸版本」
+        // 听着最对），结果副本直接空掉。语义对不代表 iOS 收，写入槽位只能靠实测。
+        //
+        // 代价：这里回到 'alternate' 就又和两份编辑指令（adjustmentPlist /
+        // adjustmentEnvelope，同为 .alternatePhoto）撞同一个槽位。
+        // 写入前的 slot 去重会把编辑指令排到后面舍弃 —— 这是 GAP-R2 的账，
+        // 要解决得给编辑指令另找一个 iOS 肯收的槽（例如原图所在的 7 号 .adjustment）。
+        return 'alternate';
       default:
         return 'alternate';
     }

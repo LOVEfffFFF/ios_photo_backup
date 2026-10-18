@@ -654,9 +654,9 @@ private func photoBackupSignalHandler(_ sig: Int32) {
         // 结果运行时**根本没走到**（日志三次都是 `role=main`）。
         // 原因：`switch` 匹配的是 Swift 枚举成员，不是 rawValue 数字。
         // 实测（2026-10-18，同一台开了风格的 ProRAW iPhone）：
-        //   · FullSizeRender.jpg  type.rawValue = 5
-        //   · `.alternatePhoto`    rawValue = 4   ← 日志 `kind=alternate type=4`
-        // 5 号在枚举里属于 photo 家族，于是落进下面的
+        //   · FullSizeRender.jpg  type.rawValue = **5** = `.fullSizePhoto`
+        //   · `.alternatePhoto`    rawValue = **4**
+        // 5 号正是 `.fullSizePhoto`，于是落进下面那档
         // `case .photo, .fullSizePhoto, .alternatePhoto` 被判成 "main"。
         //
         // 后果是渲染图与 Adjustments.plist、.aae 三者都映射到
@@ -719,16 +719,18 @@ private func photoBackupSignalHandler(_ sig: Int32) {
     /// 一次都没走到（日志恒为 `role=main`），因为 `switch` 匹配的是枚举成员，
     /// 5 号实际落在 photo 家族那一档。
     ///
-    /// 目前**只有 4 是实测确认的**：写入 `kind=alternate`（即 `.alternatePhoto`）
-    /// 成功，且副本回读 rawValue 也是 4（日志 `✓ 附加资源成功 kind=alternate type=4`）。
-    /// 其余编号未逐一验证，宁可标成 `type(n)` 也不猜——猜错编号会再次误导排查。
+    /// 目前 **4 / 5 两个编号是实测确认的**（2026-10-18，取自写入与回读日志）：
+    ///   · 4 = `.alternatePhoto` ← 日志 `✓ 附加资源成功 kind=alternate type=4`
+    ///   · 5 = `.fullSizePhoto`  ← 日志 `✓ 附加资源成功 kind=fullSizePhoto type=5`
+    /// 7（Adjustments.plist 所在）与 16（.aae 所在）尚未验证归属，
+    /// 宁可标成 `type(n)` 也不猜——猜错编号会再次把排查带进沟里。
     private static func resourceTypeName(_ raw: Int) -> String {
         let names: [Int: String] = [
             1: "photo", 2: "video", 3: "pairedVideo",
-            4: "alternatePhoto", // 实测：.alternatePhoto.rawValue == 4
-            5: "type(5)", // 实测：ProRAW 渲染图落在这一槽，枚举归属未确认
-            7: "type(7)", // 实测：Adjustments.plist 落在这一槽
-            16: "type(16)", // 实测：.aae 落在这一槽
+            4: "alternatePhoto",
+            5: "fullSizePhoto",
+            7: "type(7)", // 实测：Adjustments.plist 落在这一槽，枚举归属未确认
+            16: "type(16)", // 实测：.aae 落在这一槽，枚举归属未确认
         ]
         return names[raw] ?? "type(\(raw))"
     }
@@ -1019,11 +1021,31 @@ private func savePhotoWithExtras(call: FlutterMethodCall, result: @escaping Flut
 /// PHAssetResourceType 里**没有** poster / alternateVideo /
 /// alternatePairedVideo / fullSizePoster 这几个成员（写进去编译器会报错），
 /// 所以「编辑指令」这类只能落到语义最接近的通用成员上，让相册按 UTI 自行识别。
+///
+/// ## 哪些槽 iOS 真的肯收（实测，别凭语义想当然）
+///
+/// 2026-10-18 在一台开了风格的 ProRAW iPhone 上逐槽试出来的：
+///
+/// | 写入内容 | 槽位 | 结果 |
+/// | --- | --- | --- |
+/// | DNG | `.photo` (1) | ✓ |
+/// | JPEG 渲染图 | `.alternatePhoto` (4) | ✓ |
+/// | JPEG 渲染图 | `.fullSizePhoto` (5) | ✗ 整批 **3300** |
+/// | Adjustments.plist / .aae | `.alternatePhoto` (4) | 与 JPEG 撞槽，批内只能留一个 |
+///
+/// 注意最后两行：**`.fullSizePhoto` 收不下 JPEG**。语义上「完整尺寸版本」听着
+/// 最对，实测却会让 `performChanges` 整批失败（连只带 DNG + JPEG 的两件套也失败，
+/// 降级到只写主文件才成功），副本反而只剩 1 个资源。
+/// 所以 render 必须走 `.alternatePhoto`，见 `BackupResource.restoreType`。
 private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetResourceType? {
     switch kind {
     case "adjustmentEnvelope", "adjustmentPlist":
         // Adjustments.plist / .aae —— 编辑指令与数据。
         // 没有对应的公开枚举成员，用 alternatePhoto 承载。
+        //
+        // 代价：与渲染图（也走 alternatePhoto）抢同一个槽位，iOS 只收一个。
+        // 要根治得给编辑指令另找一个 iOS 肯收的槽 —— 原图里它待在 7 号，
+        // 很可能就是公开枚举 `.adjustment`，但**尚未实测**，不猜。
         return .alternatePhoto
     case "pairedVideo":
         return .pairedVideo
