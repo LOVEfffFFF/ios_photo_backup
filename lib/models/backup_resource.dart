@@ -85,6 +85,13 @@ class BackupResource {
         return 'pairedVideo';
       case 'raw':
         return 'fullSizePhoto';
+      case 'render':
+        // ProRAW 的渲染图（FullSizeRender.jpg）
+        //
+        // 语义是「这张照片的完整渲染版本」，.fullSizePhoto 最贴近。
+        // 关键：绝不能落到 .alternatePhoto —— 那里要和两份编辑指令抢同一个槽位，
+        // iOS 只收一个，滤镜就丢了。
+        return 'fullSizePhoto';
       default:
         return 'alternate';
     }

@@ -652,6 +652,15 @@ private func photoBackupSignalHandler(_ sig: Int32) {
         case .photo, .fullSizePhoto, .alternatePhoto:
             return "main"
         case .video, .fullSizeVideo:
+            // ProRAW 的**渲染图**被iOS 放在 fullSizeVideo 槽，但它 UTI 是
+            // public.jpeg —— 它是这张照片的渲染版本，不是「另一个视频」。
+            //
+            // 以前这里无条件返回 "main"，后果是渲染图和 photo 槽里的真正主资源
+            // 顶掉了同一个 role：清单里出现两条 role=main；恢复时它又和两份
+            // 编辑指令抢同一个 .alternatePhoto 槽位，滤镜就这么丢了。
+            if uti.contains("image") || uti.contains("jpeg") || uti.contains("heic") {
+                return "render"
+            }
             return "main"
         default:
             // 枚举里未识别的类型：只有 UTI 确实是媒体格式时才备份，
@@ -831,8 +840,43 @@ private func savePhotoWithExtras(call: FlutterMethodCall, result: @escaping Flut
     let isAdjustment = { (e: Extra) -> Bool in
         e.kind == "adjustmentPlist" || e.kind == "adjustmentEnvelope"
     }
-    let safeExtras = extras.filter { !isAdjustment($0) }
-    let adjustmentExtras = extras.filter { isAdjustment($0) }
+
+    // 同一个 PHAssetResourceType **不能 add 两次** —— iOS 只会收一个，其余被拒。
+    //
+    // 实测（2026-10-18，开了风格的 ProRAW）：渲染图、Adjustments.plist、
+    // .aae 三者语义上都落到 .alternatePhoto，三选一，滤镜必然丢。
+    // 所以写入前先按槽位去重，而不是交给 iOS 挑。
+    //
+    // 优先级：非编辑指令 > .aae（iOS 16+ 标准格式）> Adjustments.plist（旧格式）。
+    // 同优先级保持原始顺序，避免每次写入顺序不同导致结果不稳定。
+    let rank: (Extra) -> Int = { e in
+        if !isAdjustment(e) { return 0 }
+        return e.kind == "adjustmentEnvelope" ? 1 : 2
+    }
+    var seenTypes = Set<PHAssetResourceType>()
+    var uniqueExtras: [Extra] = []
+    var conflictDropped: [String] = []
+    let ordered = extras.enumerated()
+        .sorted { a, b in
+            let ra = rank(a.element), rb = rank(b.element)
+            return ra == rb ? a.offset < b.offset : ra < rb
+        }
+        .map { $0.element }
+    for e in ordered {
+        if seenTypes.contains(e.type) {
+            conflictDropped.append("\(e.kind) 被丢弃：槽位 type(\(e.type.rawValue)) 已被占用")
+            continue
+        }
+        seenTypes.insert(e.type)
+        uniqueExtras.append(e)
+    }
+    if !conflictDropped.isEmpty {
+        AppDelegate.appendLogLine(
+            "[warn] 同槽位冲突，舍弃 \(conflictDropped.count) 个附加资源:"
+            + conflictDropped.joined(separator: "; "))
+    }
+    let safeExtras = uniqueExtras.filter { !isAdjustment($0) }
+    let adjustmentExtras = uniqueExtras.filter { isAdjustment($0) }
 
     let creationDate = Date(timeIntervalSince1970: creationDateTimeInterval / 1000.0)
 
