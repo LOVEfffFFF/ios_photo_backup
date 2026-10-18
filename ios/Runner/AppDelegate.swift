@@ -1072,17 +1072,29 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
                 DispatchQueue.main.async { result(payload) }
             }
 
-            asset.requestContentEditingInput { input, _ in
+            // `with:` 不能省：闭包参数前有默认参数时尾随闭包语法仍要求显式标签
+            asset.requestContentEditingInput(
+                with: PHContentEditingInputRequestOptions()
+            ) { input, _ in
                 answered = true
 
+                // 注意类型：input.adjustmentData 是 **PHAdjustmentData**，
+                // 不是 Data，真正的字节在它的 .data 上。
                 var adjBytes = 0
                 var adjSha = ""
-                if let d = input?.adjustmentData, !d.isEmpty {
-                    adjBytes = d.count
+                var adjFormat = ""
+                var adjVersion = ""
+                var adjUTI = ""
+                if let adj = input?.adjustmentData {
+                    adjBytes = adj.data.count
                     let h = SHA256()
-                    h.update(data: d)
+                    h.update(data: adj.data)
                     adjSha = h.finalize()
                         .map { String(format: "%02x", $0) }.joined()
+                    // 这三项是判断「iOS 认不认我们写的槽位」的关键线索
+                    adjFormat = adj.formatIdentifier
+                    adjVersion = adj.formatVersion
+                    adjUTI = adj.exportedUniformTypeIdentifier
                 }
 
                 let fsURL = input?.fullSizeImageURL
@@ -1099,6 +1111,9 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
                     "adjustmentResources": adjResources,
                     "contentAdjustmentBytes": adjBytes,
                     "contentAdjustmentSha256": adjSha,
+                    "contentAdjustmentFormat": adjFormat,
+                    "contentAdjustmentFormatVersion": adjVersion,
+                    "contentAdjustmentUTI": adjUTI,
                     "isContentEditable": input?.isContentEditable ?? false,
                     "renderedImagePath": fsURL?.path ?? "",
                     "renderedImageBytes": renderBytes,
@@ -1119,6 +1134,9 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
                         "adjustmentResources": adjResources,
                         "contentAdjustmentBytes": 0,
                         "contentAdjustmentSha256": "",
+                        "contentAdjustmentFormat": "",
+                        "contentAdjustmentFormatVersion": "",
+                        "contentAdjustmentUTI": "",
                         "isContentEditable": false,
                         "renderedImagePath": "",
                         "renderedImageBytes": 0,

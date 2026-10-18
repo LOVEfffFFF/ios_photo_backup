@@ -905,6 +905,9 @@ class AssetEditingInfo {
     required this.adjustmentResources,
     required this.contentAdjustmentBytes,
     required this.contentAdjustmentSha256,
+    this.contentAdjustmentFormat = '',
+    this.contentAdjustmentFormatVersion = '',
+    this.contentAdjustmentUTI = '',
     required this.isContentEditable,
     required this.renderedImagePath,
     required this.renderedImageBytes,
@@ -922,6 +925,15 @@ class AssetEditingInfo {
   /// iOS 自己的编辑指令字节数与哈希（权威来源）
   final int contentAdjustmentBytes;
   final String contentAdjustmentSha256;
+
+  /// 编辑数据格式标识（实测 ProRAW 套风格后为 `com.apple.photo`）
+  final String contentAdjustmentFormat;
+
+  /// 格式版本（实测 `1.4`）
+  final String contentAdjustmentFormatVersion;
+
+  /// iOS 建议的导出 UTI —— 判断「该用哪个槽位写回」的关键线索
+  final String contentAdjustmentUTI;
 
   final bool isContentEditable;
 
@@ -965,6 +977,10 @@ class AssetEditingInfo {
           (raw['contentAdjustmentBytes'] as num?)?.toInt() ?? 0,
       contentAdjustmentSha256:
           '${raw['contentAdjustmentSha256'] ?? ''}',
+      contentAdjustmentFormat: '${raw['contentAdjustmentFormat'] ?? ''}',
+      contentAdjustmentFormatVersion:
+          '${raw['contentAdjustmentFormatVersion'] ?? ''}',
+      contentAdjustmentUTI: '${raw['contentAdjustmentUTI'] ?? ''}',
       isContentEditable: raw['isContentEditable'] == true,
       renderedImagePath: '${raw['renderedImagePath'] ?? ''}',
       renderedImageBytes: (raw['renderedImageBytes'] as num?)?.toInt() ?? 0,
