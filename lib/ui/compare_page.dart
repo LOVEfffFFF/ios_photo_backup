@@ -6,6 +6,10 @@ import '../app_info.dart';
 import '../helpers/photo_library_helper.dart';
 import '../managers/record_store.dart';
 import '../models/backup_record.dart';
+// ManifestRecords 要显式构造 BackupResource（清单里一条资产有多条 role 行），
+// 只访问 record.extraResources 的属性时用不到这个 import，漏了会报
+// "'BackupResource' isn't a type"
+import '../models/backup_resource.dart';
 import '../services/log_service.dart';
 import '../services/server_client.dart';
 import '../services/server_config.dart';
