@@ -1324,7 +1324,10 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
                 request.addResource(with: .photo, fileURL: URL(fileURLWithPath: dngPath),
                                     options: nil)
                 request.addResource(with: .adjustmentData, fileURL: tmp, options: nil)
-                placeholderID = request.placeholderForCreatedAsset.localIdentifier
+                // `placeholderForCreatedAsset` 是**可空**的，不能直接取成员
+                if let placeholder = request.placeholderForCreatedAsset {
+                    placeholderID = placeholder.localIdentifier
+                }
             }, completionHandler: { success, error in
                 guard success, !placeholderID.isEmpty else {
                     rows.append([
@@ -1369,10 +1372,16 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
         }
         let opts = PHAssetResourceRequestOptions()
         opts.isNetworkAccessAllowed = true
+        // ⚠ `requestData` 的 completionHandler **只收一个参数**（Error?），
+        // 数据是从 dataReceivedHandler 逐块送来的 —— 我一开始写成
+        // `{ error, data in }` 被 CI 当场抓住。
+        var buf = Data()
         PHAssetResourceManager.default().requestData(
             for: render, options: opts,
-            dataReceivedHandler: { _ in },
-            completionHandler: { error, data in
+            dataReceivedHandler: { chunk in
+                buf.append(chunk)
+            },
+            completionHandler: { error in
                 if let error = error {
                     rows([
                         "name": name, "note": note,
@@ -1381,17 +1390,17 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
                     ])
                     return
                 }
-                guard let data = data else {
+                if buf.isEmpty {
                     rows([
                         "name": name, "note": note,
-                        "status": "渲染图为空", "variance": -1,
+                        "status": "渲染图为空（iOS 还没生成）", "variance": -1,
                     ])
                     return
                 }
-                let v = Self.brightnessVariance(data)
+                let v = Self.brightnessVariance(buf)
                 rows([
                     "name": name, "note": note,
-                    "bytes": data.count,
+                    "bytes": buf.count,
                     "variance": v ?? -1,
                     "status": v == nil ? "解码失败"
                         : (v! < 60 ? "**纯色图（重建失败）**" : "正常图像"),
