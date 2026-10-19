@@ -1358,7 +1358,10 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
     /// 读某个副本 iOS 自己生成的渲染图，用亮度方差判「真图 / 纯色图」
     private static func judgeRebuilt(
         assetId: String, name: String, note: String,
-        rows: (([String: Any]) -> Void)
+        // 必须 @escaping：它会被传进 requestData 的异步回调里，
+        // 默认的 non-escaping 逃不出去（CI 报 escaping closure captures
+        // non-escaping parameter）。
+        rows: @escaping ([String: Any]) -> Void
     ) {
         let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [assetId], options: nil)
         guard let asset = fetch.firstObject,
