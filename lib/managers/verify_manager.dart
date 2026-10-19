@@ -404,6 +404,21 @@ class VerifyManager {
         }
       }
 
+      // ---- ④a-2 渲染图重建校验：iOS 有没有真用上这份编辑指令 ----
+      //
+      // 写入时我们把渲染图**交回 iOS 自己生成**（restoreType=auto），
+      // 所以副本里唯一能显示的就是它按 [1]DNG + [7]编辑指令重建的结果。
+      // 这意味着副本里渲染图的**大小**就是一个现成的判据：
+      //
+      //   与备份里的渲染图同一量级 → 重建成功，指令与基图配对正确
+      //   远小于备份（例如只有 0.3%）→ 重建出来是空白/纯色，配对失败
+      //
+      // 没有这一条的话，只能靠肉眼看图 —— 前两次实验就是这么发现的，
+      // 代价是白白装两轮包。
+      if (restoredId.isNotEmpty) {
+        await _checkRebuiltRender(record, restoredId);
+      }
+
       // ---- ④b 编辑（滤镜）信息对比 ----
       // 这是「滤镜对不对」的决定性证据：哈希一致说明编辑指令一个字节没丢，
       // 若显示仍不同，那就是 iOS 不认我们写入的槽位（平台限制）；
@@ -548,6 +563,101 @@ class VerifyManager {
   /// 哈希太长，日志里只留前 16 位便于肉眼比对
   static String _short(String? sha) =>
       (sha == null || sha.isEmpty) ? '(无)' : '${sha.substring(0, 16)}…';
+
+  /// 渲染图重建校验：副本里 iOS 自己生成的渲染图，够不够「一张真图」的大小
+  ///
+  /// ## 为什么这个判据成立
+  ///
+  /// 写入时渲染图被刻意**不写**（`restoreType=auto`），副本里唯一能显示的
+  /// 就是 iOS 拿 `[1]DNG` + `[7]编辑指令` 现场渲染的结果。于是：
+  ///
+  ///  · 重建成功 → 与备份里的渲染图同一量级（同一张照片的 JPEG 编码）
+  ///  · 重建失败 → 空白/纯色，体积会掉到零头（实测坏图只有几十 KB 级）
+  ///
+  /// 拿它和备份记录里 `role=render` 的字节数一比，结论是确定的，
+  /// 不用靠肉眼盯屏幕 —— 前两次实验（黑图、纯灰白）都是肉眼发现的，
+  /// 每次都要装一轮包，代价太大。
+  static Future<void> _checkRebuiltRender(
+    BackupRecord record,
+    String restoredId,
+  ) async {
+    // 基准：备份里那张「正确答案」渲染图有多大
+    var expect = 0;
+    for (final e in record.extraResources) {
+      if (e.role == 'render') {
+        expect = e.bytes;
+        break;
+      }
+    }
+    if (expect <= 0) {
+      LogService.instance.write(
+        LogLevel.info,
+        'verify',
+        '渲染图重建校验: 备份记录里没有渲染图（role=render），跳过'
+        '（本次不适用该判据）',
+      );
+      return;
+    }
+
+    final info = await PhotoLibraryHelper.getAssetFullInfo(restoredId);
+    if (info == null) {
+      LogService.instance.write(
+        LogLevel.warn,
+        'verify',
+        '渲染图重建校验: 读不到副本的资源明细，无法判断',
+      );
+      return;
+    }
+
+    // 副本里 iOS 自己渲染的那张
+    AssetResourceDetail? got;
+    for (final r in info.resources) {
+      if (r.typeRawValue == 5 ||
+          r.uti == 'public.jpeg' && r.filename.startsWith('FullSizeRender')) {
+        got = r;
+        break;
+      }
+    }
+    if (got == null) {
+      LogService.instance.write(
+        LogLevel.warn,
+        'verify',
+        '渲染图重建校验: 副本里**没有** iOS 生成的渲染图'
+        '（资源共 ${info.resourceCount} 个：'
+        '${info.resources.map((e) => 'type(${e.typeRawValue})/${e.filename}').join(' · ')}）',
+      );
+      return;
+    }
+
+    if (got.failed || got.bytes <= 0) {
+      // 读到 0 字节可能是读取失败，不是「重建出了空白图」——
+      // 这两件事的结论完全相反，不能混为一谈。
+      LogService.instance.write(
+        LogLevel.warn,
+        'verify',
+        '渲染图重建校验: 副本渲染图读取失败（${got.error.isEmpty ? '0 字节' : got.error}），'
+        '无法判断重建结果',
+      );
+      return;
+    }
+
+    final ratio = got.bytes / expect;
+    // 同一张照片的 JPEG，体积差几成很正常；掉到零头基本就是空白图
+    final ok = ratio > 0.5;
+    LogService.instance.write(
+      ok ? LogLevel.info : LogLevel.warn,
+      'verify',
+      '渲染图重建校验: 备份渲染图 ${_mb(expect)}'
+      ' / 副本 iOS 重建 ${_mb(got.bytes)}'
+      ' = ${(ratio * 100).toStringAsFixed(1)}%'
+      '\n    ${ok ? "体积正常 → iOS 用上了这份编辑指令，配对成功" : "**体积异常** → 重建出来的多半是空白/纯色图，指令与基图没配上"}',
+    );
+  }
+
+  static String _mb(int b) =>
+      b >= 1024 * 1024
+          ? '${(b / 1024 / 1024).toStringAsFixed(2)}MB'
+          : '${(b / 1024).toStringAsFixed(1)}KB';
 
   /// 取文件大小，失败返回 0（只用于日志，不影响验证结论）
   static Future<int> _sizeOfFile(String path) async {

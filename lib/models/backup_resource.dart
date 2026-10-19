@@ -78,34 +78,41 @@ class BackupResource {
   String get restoreType {
     switch (role) {
       case 'adjustmentAAE':
-        return 'adjustmentEnvelope';
+        // .aae（apple-adjustment-envelope）**本次实验舍弃**
+        //
+        // 原图的 [7] adjustmentData 槽里装的是 `Adjustments.plist`
+        // （UTI=com.apple.property-list），**不是** .aae。
+        // 实测把 .aae 写进 adjustmentData，iOS 全盘接受
+        // （written=2/2 主动丢弃=0）却渲染出**纯灰白图** ——
+        // 它按 plist 语义去解析一个 envelope 格式，解析不出可渲染的内容。
+        return 'auto';
       case 'adjustment':
-        return 'adjustmentPlist';
+        // Adjustments.plist → 官方槽位 `.adjustmentData`（实测 rawValue 7）
+        //
+        // 这一条与原图结构**逐槽一致**：
+        /// ```
+        /// 原图：[1/photo]DNG · [7]Adjustments.plist · [16].aae
+        ///       · [5/fullSizePhoto]FullSizeRender.jpg
+        /// ```
+        ///
+        // 剩下的渲染图**交回给 iOS 自己生成**（见下面 render 分支）。
+        return 'adjustmentData';
       case 'pairedVideo':
         return 'pairedVideo';
       case 'raw':
         return 'fullSizePhoto';
       case 'render':
-        // ProRAW 的渲染图（FullSizeRender.jpg）
+        // ProRAW 的渲染图（FullSizeRender.jpg）→ **不写，交回 iOS 自己生成**
         //
-        // ## 写哪个槽位：实测只有 .alternatePhoto 收得下JPEG
+        // 原图里这张图是 iOS 根据 `.photo` 的 DNG + [7] 的编辑指令
+        // **自己渲染出来的**，放在 [5] fullSizePhoto 槽。
+        // 我们自己塞一张进去（写 5 号槽会被 3300 整批拒收，
+        // 写 4 号 alternatePhoto 虽能过，但会掩盖「指令配对到底成没成」——
+        // 失败了也会看到一张图，分不清是谁的锅）。
         //
-        // 实测（2026-10-18，build 23:31 往返验证，逐次尝试的原文）：
-        //   · `.alternatePhoto`（实测 rawValue **4**）写 JPEG → ✓ 写入成功
-        //   · `.fullSizePhoto`（实测 rawValue **5**）写 JPEG   → ✗ PHPhotosErrorDomain **3300**
-        //     连「DNG 走 .photo + JPEG 走 .fullSizePhoto」这种最朴素的两件套
-        //     都整批失败，降级到「只写主文件」才成功 —— 副本只剩 1 个资源，
-        //     比不写还糟。推测 iOS 要求 fullSizePhoto 槽与 photo 槽同源同格式，
-        //     塞一张 JPEG 进去与 DNG 打架。
-        //
-        // **踩过一次的坑**：曾把这里写成 'fullSizePhoto'（语义上「完整尺寸版本」
-        // 听着最对），结果副本直接空掉。语义对不代表 iOS 收，写入槽位只能靠实测。
-        //
-        // 代价：这里回到 'alternate' 就又和两份编辑指令（adjustmentPlist /
-        // adjustmentEnvelope，同为 .alternatePhoto）撞同一个槽位。
-        // 写入前的 slot 去重会把编辑指令排到后面舍弃 —— 这是 GAP-R2 的账，
-        // 要解决得给编辑指令另找一个 iOS 肯收的槽（例如原图所在的 7 号 .adjustment）。
-        return 'alternate';
+        // 交回 iOS 之后，副本里唯一能显示的就是它自己重建的渲染图，
+        // **成功与否一眼可判**：重建成功就是原样，重建失败就是空白/纯色。
+        return 'auto';
       default:
         return 'alternate';
     }

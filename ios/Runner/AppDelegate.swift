@@ -888,12 +888,20 @@ private func savePhotoWithExtras(call: FlutterMethodCall, result: @escaping Flut
                   FileManager.default.fileExists(atPath: p) else { continue }
             let kind = item["restoreType"] as? String ?? "alternate"
             guard let t = Self.phAssetResourceType(forRestoreType: kind) else {
-                // 以前是静默 `continue`：槽位不可用时资源凭空消失，
-                // 日志里连「少了谁」都查不到。编辑指令正在改投未验证的槽位
-                // (7 / 8)，这条日志就是唯一的观测点。
-                AppDelegate.appendLogLine(
-                    "[warn] 附加资源没有可用槽位，已跳过 kind=\(kind)"
-                    + " 文件=\(URL(fileURLWithPath: p).lastPathComponent)")
+                // `auto` 是 Dart 侧**主动要求不写**（交回 iOS 自己生成），
+                // 不是出错，两者必须分开记 —— 否则日志里全是「失败」，
+                // 真正该警觉的失败反而被淹没。
+                if kind == "auto" {
+                    AppDelegate.appendLogLine(
+                        "[info] 附加资源按 restoreType=auto 交回 iOS 自己生成"
+                        + " 文件=\(URL(fileURLWithPath: p).lastPathComponent)")
+                } else {
+                    // 以前是静默 `continue`：槽位不可用时资源凭空消失，
+                    // 连「少了谁」都查不到。
+                    AppDelegate.appendLogLine(
+                        "[warn] 附加资源没有可用槽位，已跳过 kind=\(kind)"
+                        + " 文件=\(URL(fileURLWithPath: p).lastPathComponent)")
+                }
                 continue
             }
             extras.append(Extra(type: t, url: URL(fileURLWithPath: p), kind: kind))
@@ -1114,12 +1122,24 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
         /// 而我们塞进去的是 `.aae`（UTI 不同），iOS 按 plist 语义去解析
         /// 一个 envelope 格式，解析出来的东西自然渲染不出画面。
         ///
-        // ## 现状
+        // ## 现状：按原图结构逐槽复现（实验三）
         //
-        // 退回 `.alternatePhoto`：与渲染图撞槽后由去重逻辑舍弃编辑指令，
-        // 副本 = DNG + 渲染图。**滤镜丢失，但画面是好的** ——
-        // 前两次实验证明，写错格式的代价是内容损坏，这个代价太高。
-        return .alternatePhoto
+        // 改法：`Adjustments.plist` → `.adjustmentData`（与原图 7 号槽 UTI 一致），
+        // `.aae` 与渲染图都交回 iOS 自己处理。
+        //
+        // 交回渲染图是关键：原图里那张 `FullSizeRender.jpg` 是 iOS 自己
+        // 根据 DNG + 编辑指令渲染出来的。我们塞一张进去，它就成了「遮羞布」——
+        // 就算指令配对全错，副本照样有图可看，分不清成没成。
+        // 交回之后，副本里唯一能显示的就是 iOS 自己的重建结果，
+        // **成功即原样，失败即空白**，一眼可判。
+        return .adjustmentData
+    case "auto":
+        // Dart 侧显式要求「不写这个资源，交回 iOS 自己去生成」。
+        // 返回 nil 让调用方跳过；这不是错误，调用方会区别于警告单独记一条。
+        return nil
+    case "adjustmentEnvelope":
+        // 旧兜底：.aae 没有对应槽位，且实测写进去会让 iOS 渲染出纯色图。
+        return nil
     case "pairedVideo":
         return .pairedVideo
     case "fullSizePhoto":
