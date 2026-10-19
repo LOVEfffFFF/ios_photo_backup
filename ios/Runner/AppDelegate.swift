@@ -865,6 +865,15 @@ private func savePhotoWithExtras(call: FlutterMethodCall, result: @escaping Flut
         return
     }
 
+    // 槽位编号实测：Apple 文档**不给 rawValue**，只能跑出来看。
+    // 这条日志一次性钉死全部编号，以后写槽位逻辑不必再靠猜。
+    AppDelegate.appendLogLine(
+        "[info] 槽位编号实测 photo=\(PHAssetResourceType.photo.rawValue)"
+        + " alternatePhoto=\(PHAssetResourceType.alternatePhoto.rawValue)"
+        + " fullSizePhoto=\(PHAssetResourceType.fullSizePhoto.rawValue)"
+        + " adjustmentData=\(PHAssetResourceType.adjustmentData.rawValue)"
+        + " adjustmentBasePhoto=\(PHAssetResourceType.adjustmentBasePhoto.rawValue)")
+
     // 附加资源：[{restoreType, path, uti, filename}]
     struct Extra { let type: PHAssetResourceType; let url: URL; let kind: String }
     var extras: [Extra] = []
@@ -1042,10 +1051,12 @@ private func savePhotoWithExtras(call: FlutterMethodCall, result: @escaping Flut
 
 /// Dart 侧传来的语义类型 → PHAssetResourceType
 ///
-/// ## 只用编译期校验过的枚举成员
-/// PHAssetResourceType 里**没有** poster / alternateVideo /
-/// alternatePairedVideo / fullSizePoster 这几个成员（写进去编译器会报错），
-/// 所以「编辑指令」这类只能落到语义最接近的通用成员上，让相册按 UTI 自行识别。
+/// 只用编译期校验过的枚举成员
+///
+/// PHAssetResourceType 里**没有** poster / fullSizePoster 这几个成员
+/// （写进去编译器会报错）。`.adjustmentData` / `.adjustmentBasePhoto`
+/// 是有的 —— 早先写成 `.adjustment` 被 CI 拦下，误以为整组都没导出，
+/// 实际只是名字敲错了。
 ///
 /// ## 哪些槽 iOS 真的肯收（实测，别凭语义想当然）
 ///
@@ -1067,24 +1078,31 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
     case "adjustmentEnvelope", "adjustmentPlist":
         // Adjustments.plist / .aae —— 编辑指令与数据。
         //
-        // ## 这里踩过「黑图」，别再动
+        // ## Apple 官方为「重建编辑」设计的槽位（2026-10-19 查证）
         //
-        // 2026-10-19 实测：把它们改投 `PHAssetResourceType(rawValue: 7)`
-        // （原图里 `Adjustments.plist` 确实待在 7），**iOS 会收下**——
-        // 副本里真的出现了 `type(7)]Adjustments.plist`，写入结果 written=2。
+        // ```
+        // case adjustmentData      // 提供重建对资源的最近编辑所需的数据
+        // case adjustmentBasePhoto // 提供照片资源的原始版本，用于重建最近的编辑
+        // ```
         //
-        // 然后副本**渲染成黑图**。原因：7 号槽里的编辑指令与渲染基图
-        // （`FullSizeRender.jpg`）是绑定关系，iOS 拿指令去找基图，
-        // 而我们把渲染图放进了 `.alternatePhoto`（写 `.fullSizePhoto` 会被 3300 拒），
-        // 基图对不上 → 渲染失败 → 黑图。
+        // 两者是**成对**的：基图 + 指令，iOS 才有办法重建编辑后的画面。
         //
-        // 所以铁律是：**编辑指令不能单独硬塞槽位**。
-        // 能写进去 ≠ 能正确应用，写错的表现不是「丢滤镜」而是「内容损坏」，
-        // 后者严重得多。宁可让编辑指令被去重舍弃，也不能写出黑图。
+        // ## 为什么之前会写出黑图
         //
-        // 因此这里维持 `.alternatePhoto`：与渲染图撞槽后由写入前的去重逻辑
-        // 主动舍弃，副本退化成「DNG + 渲染图」——滤镜丢失，但图是好的。
-        return .alternatePhoto
+        // 上一版用 `PHAssetResourceType(rawValue: 7)` 硬塞 —— 7 号槽其实是
+        // `.adjustmentBasePhoto`（**基图**槽），把一份编辑指令当基图喂进去，
+        // iOS 拿它去渲染，结果就是黑图。语义从一开始就反了。
+        //
+        // 再往前一版写 `.adjustment` 被 CI 拦下，当时误读成「Swift 没导出这组
+        // 枚举」——**其实是我把名字写错了**，正确的是 `.adjustmentData`。
+        //
+        // ## 现在的分工
+        //
+        // `.aae` 是 iOS 16+ 的标准格式，走 `.adjustmentData`；
+        // `Adjustments.plist` 是旧格式，同样映射到 `.adjustmentData`，
+        // 于是两者撞槽，由写入前的去重逻辑按 rank 保留 `.aae`、舍弃 plist。
+        // 无论是谁被舍弃，主文件与渲染图都不受影响，不会写坏画面。
+        return .adjustmentData
     case "pairedVideo":
         return .pairedVideo
     case "fullSizePhoto":
