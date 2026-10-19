@@ -599,6 +599,11 @@ class VerifyManager {
       return;
     }
 
+    // iOS 生成 FullSizeRender.jpg 是**异步派生**的：写入刚结束就去读，
+    // 它还没被真正生成，requestData 会回 3302（PHPhotosErrorInterrupted）。
+    // 先给它一点时间，否则每次都只能读到「读不到」，判据等于没有。
+    await Future<void>.delayed(const Duration(seconds: 4));
+
     final info = await PhotoLibraryHelper.getAssetFullInfo(restoredId);
     if (info == null) {
       LogService.instance.write(

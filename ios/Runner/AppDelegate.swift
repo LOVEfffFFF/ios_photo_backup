@@ -1097,10 +1097,20 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
     //
     // 所以 default 分支现在必须留痕：非预期值进来要在日志里看得见。
     switch kind {
-    case "auto", "adjustmentEnvelope":
-        // `auto` = Dart 侧主动要求「不写这个资源，交回 iOS 自己去生成」。
-        // `adjustmentEnvelope` = 旧记录里 .aae 的兜底，同样交回。
+    case "auto":
+        // Dart 侧显式要求「不写这个资源，交回 iOS 自己去生成」。
         return nil
+    case "adjustmentEnvelope":
+        // .aae → 16 号槽（**复刻原图位置**）
+        //
+        // 原图实测：`[16].aae` —— 这个槽位在 PHAssetResourceType 里
+        // **没有对应的 Swift 枚举成员**（与 poster/alternateVideo 同类），
+        // 只能按 rawValue 构造。值来自真机日志，不是猜的。
+        //
+        // 之所以补上它：原图是四槽结构（1 / 7 / 16 / 5），我们此前一直把
+        // .aae 交回 iOS，副本少了 16 号，结构没能完全对齐 ——
+        // 而前三次实验（黑图 / 纯灰白）失败的头号嫌疑就是结构没对齐。
+        return PHAssetResourceType(rawValue: 16)
     case "adjustmentPlist":
         // Adjustments.plist → 官方槽位 `.adjustmentData`（实测 rawValue 7）
         //

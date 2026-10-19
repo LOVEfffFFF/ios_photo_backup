@@ -78,14 +78,22 @@ class BackupResource {
   String get restoreType {
     switch (role) {
       case 'adjustmentAAE':
-        // .aae（apple-adjustment-envelope）**本次实验舍弃**
+        // .aae → 原图所在的 16 号槽（**不再舍弃**）
         //
-        // 原图的 [7] adjustmentData 槽里装的是 `Adjustments.plist`
-        // （UTI=com.apple.property-list），**不是** .aae。
-        // 实测把 .aae 写进 adjustmentData，iOS 全盘接受
-        // （written=2/2 主动丢弃=0）却渲染出**纯灰白图** ——
-        // 它按 plist 语义去解析一个 envelope 格式，解析不出可渲染的内容。
-        return 'auto';
+        // 原图实测结构：
+        /// ```
+        /// [1/photo]DNG · [7/adjustmentData]Adjustments.plist
+        ///       · [16].aae · [5/fullSizePhoto]FullSizeRender.jpg
+        /// ```
+        //
+        // 之前一直把 .aae 交回 iOS（restoreType=auto），副本少了 16 号这一槽，
+        // 结构就没能和原图完全对齐 —— 而结构对齐恰恰是前三次
+        // （黑图 / 纯灰白）失败的头号嫌疑。
+        //
+        // ⚠ 16 号在 PHAssetResourceType 里**没有对应的 Swift 枚举成员**，
+        // 只能按 rawValue 构造。值取自原图实测（那张照片的 .aae 确实在 16 号槽），
+        // 不是猜的。写入失败会走降级阶梯，不影响主文件与已有资源。
+        return 'adjustmentEnvelope';
       case 'adjustment':
         // Adjustments.plist → 官方槽位 `.adjustmentData`（实测 rawValue 7）
         //
