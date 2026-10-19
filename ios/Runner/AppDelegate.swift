@@ -516,6 +516,10 @@ private func photoBackupSignalHandler(_ sig: Int32) {
         case .fullSizeVideo: return "fullSizeVideo"
         case .fullSizePairedVideo: return "fullSizePairedVideo"
         case .alternatePhoto: return "alternatePhoto"
+        // 2026-10-19 补：这两个**确实存在**。早先写 `.adjustment` 被 CI 拦下，
+        // 当时误判成「整组没导出」，实际只是名字敲错了。
+        case .adjustmentData: return "adjustmentData"
+        case .adjustmentBasePhoto: return "adjustmentBasePhoto"
         // 注意：poster / alternateVideo / alternatePairedVideo / fullSizePoster
         // 在 PHAssetResourceType 里并不存在（它们只出现在旧文档与网络资料里），
         // 写进 switch 会编译失败。遇到未知值由 default 兜底。
@@ -731,7 +735,8 @@ private func photoBackupSignalHandler(_ sig: Int32) {
             1: "photo", 2: "video", 3: "pairedVideo",
             4: "alternatePhoto",
             5: "fullSizePhoto",
-            7: "type(7)", // 实测：Adjustments.plist 落在这一槽，枚举归属未确认
+            7: "adjustmentData",
+            8: "adjustmentBasePhoto",
             16: "type(16)", // 实测：.aae 落在这一槽，枚举归属未确认
         ]
         return names[raw] ?? "type(\(raw))"
@@ -1078,31 +1083,43 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
     case "adjustmentEnvelope", "adjustmentPlist":
         // Adjustments.plist / .aae —— 编辑指令与数据。
         //
-        // ## Apple 官方为「重建编辑」设计的槽位（2026-10-19 查证）
+        // ## 槽位真值（2026-10-19 实测，Apple 文档不提供 rawValue）
         //
         // ```
-        // case adjustmentData      // 提供重建对资源的最近编辑所需的数据
-        // case adjustmentBasePhoto // 提供照片资源的原始版本，用于重建最近的编辑
+        // photo=1  alternatePhoto=4  fullSizePhoto=5
+        // adjustmentData=7  adjustmentBasePhoto=8
         // ```
         //
-        // 两者是**成对**的：基图 + 指令，iOS 才有办法重建编辑后的画面。
+        // ## 两次失败实验（都产出坏图，已回滚）
         //
-        // ## 为什么之前会写出黑图
+        // **实验一**：编辑指令 → `rawValue(7)`，iOS 收下（副本里出现
+        // `type(7)Adjustments.plist`），副本渲染成**黑图**。
         //
-        // 上一版用 `PHAssetResourceType(rawValue: 7)` 硬塞 —— 7 号槽其实是
-        // `.adjustmentBasePhoto`（**基图**槽），把一份编辑指令当基图喂进去，
-        // iOS 拿它去渲染，结果就是黑图。语义从一开始就反了。
+        // **实验二**：`.aae` → `.adjustmentData`(7)，写入 `2/2 主动丢弃=0`
+        // 全盘接受，副本渲染成**纯灰白**。
         //
-        // 再往前一版写 `.adjustment` 被 CI 拦下，当时误读成「Swift 没导出这组
-        // 枚举」——**其实是我把名字写错了**，正确的是 `.adjustmentData`。
+        // 两次的共同点：iOS 认下了这份数据，并**自己动手重建**渲染图
+        // （副本里的 `FullSizeRender.jpg` 是它生成的，不是我们写的），
+        // 但重建失败。说明机制是通的，**缺的是让指令与基图正确配对**。
         //
-        // ## 现在的分工
+        // 为什么配不上 —— 对比原图结构（实测）：
         //
-        // `.aae` 是 iOS 16+ 的标准格式，走 `.adjustmentData`；
-        // `Adjustments.plist` 是旧格式，同样映射到 `.adjustmentData`，
-        // 于是两者撞槽，由写入前的去重逻辑按 rank 保留 `.aae`、舍弃 plist。
-        // 无论是谁被舍弃，主文件与渲染图都不受影响，不会写坏画面。
-        return .adjustmentData
+        /// ```
+        /// 原图：[1/photo]DNG · [7]Adjustments.plist(uti=com.apple.property-list)
+        ///       · [16].aae · [5/fullSizePhoto]FullSizeRender.jpg
+        /// 我们：[1/photo]DNG · [7].aae · [4/alternatePhoto]渲染图
+        /// ```
+        ///
+        /// 原图的 7 号槽装的是 **Adjustments.plist**（UTI 一致），
+        /// 而我们塞进去的是 `.aae`（UTI 不同），iOS 按 plist 语义去解析
+        /// 一个 envelope 格式，解析出来的东西自然渲染不出画面。
+        ///
+        // ## 现状
+        //
+        // 退回 `.alternatePhoto`：与渲染图撞槽后由去重逻辑舍弃编辑指令，
+        // 副本 = DNG + 渲染图。**滤镜丢失，但画面是好的** ——
+        // 前两次实验证明，写错格式的代价是内容损坏，这个代价太高。
+        return .alternatePhoto
     case "pairedVideo":
         return .pairedVideo
     case "fullSizePhoto":
