@@ -289,7 +289,10 @@ class PhotoLibraryHelper {
       final raw = await _channel.invokeMethod('getAssetFullInfo', {
         'localIdentifier': localIdentifier,
         'hexLimit': 512,
-        'inlineLimit': 65536,
+        // 4KB 足够摊开编辑指令（实测 880~1078 字节）。
+        // 之前设 64KB，几个资源一叠加就是上百 KB 的字符串走 MethodChannel，
+        // 既慢又没必要 —— 我们要看的从来不是 JPEG/DNG 的字节。
+        'inlineLimit': 4096,
       });
       if (raw is! Map) return null;
       final err = raw['error'] as String?;
@@ -1172,10 +1175,20 @@ class AssetFullInfo {
       resources.fold<int>(0, (sum, r) => sum + r.bytes);
 
   factory AssetFullInfo.fromChannel(Map<String, dynamic> raw) {
+    // ⚠ 不能用 `whereType<Map<String, dynamic>>()`：
+    // MethodChannel 反序列化出来的 Map 运行时类型是 `Map<Object?, Object?>`，
+    // 泛型不匹配会被 whereType **全部过滤掉**，resources 直接变成空列表
+    // （表现为「资源共 0 个」这种自相矛盾的日志）。
+    // 正确做法是先 whereType<Map>() 再 cast。
     List<Map<String, dynamic>> rows() =>
         ((raw['resources'] as List?) ?? const [])
-            .whereType<Map<String, dynamic>>()
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
             .toList();
+    List<String> strings(String key) => ((raw[key] as List?) ?? const [])
+        .whereType<Object>()
+        .map((e) => '$e')
+        .toList();
     return AssetFullInfo(
       localIdentifier: '${raw['localIdentifier'] ?? ''}',
       creationDate: (raw['creationDate'] as num?)?.toDouble() ?? 0,
@@ -1187,16 +1200,17 @@ class AssetFullInfo {
       isFavorite: raw['isFavorite'] == true,
       isHidden: raw['isHidden'] == true,
       originalFilename: '${raw['originalFilename'] ?? ''}',
-      subtypes:
-          ((raw['subtypes'] as List?) ?? const []).map((e) => '$e').toList(),
+      subtypes: strings('subtypes'),
       hasLocation: raw['hasLocation'] == true,
       latitude: (raw['latitude'] as num?)?.toDouble() ?? 0,
       longitude: (raw['longitude'] as num?)?.toDouble() ?? 0,
-      formatDescriptions: ((raw['formatDescriptions'] as List?) ?? const [])
-          .map((e) => '$e')
-          .toList(),
+      formatDescriptions: strings('formatDescriptions'),
       resources: rows().map(AssetResourceDetail.fromChannel).toList(),
-      editing: (raw['editing'] as Map?)?.cast<String, dynamic>() ?? {},
+      // `.cast()` 是惰性视图，元素类型不符时会在**访问时**才炸；
+      // from() 是当场拷贝，行为可预期。
+      editing: raw['editing'] is Map
+          ? Map<String, dynamic>.from(raw['editing'] as Map)
+          : {},
     );
   }
 }
