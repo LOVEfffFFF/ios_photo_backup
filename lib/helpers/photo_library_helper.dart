@@ -323,6 +323,43 @@ class PhotoLibraryHelper {
     }
   }
 
+  /// 一轮跑完编辑数据的所有变体，直接给出「哪张是真图」的结论
+  ///
+  /// 背景：GAP-R2 四轮实验全部产出坏图（黑图 / 纯灰白 / 灰白），
+  /// 第 4 轮甚至已把副本四槽结构与原图**逐槽对齐**，iOS 也确实重建出了
+  /// `FullSizeRender.jpg`，但渲染结果依然错。剩下的嫌疑是 plist 里的字段
+  /// 与新建资产对不上，尤其 `adjustmentTimestamp`（记的是原图被编辑那一刻）。
+  ///
+  /// 一轮只试一个变体代价太大（每次装包+验证+肉眼判图），
+  /// 所以这里每个变体各写一个副本，再由原生侧用**亮度方差**判真假：
+  /// 正常照片明暗跨度大、方差上百；灰白或纯黑整张一个色调、方差接近 0。
+  static Future<List<Map<String, dynamic>>> probeAdjustmentVariants({
+    required String dngPath,
+    required String plistPath,
+    required String tag,
+    required double created,
+  }) async {
+    try {
+      final raw = await _channel.invokeMethod('probeAdjustmentVariants', {
+        'dngPath': dngPath,
+        'plistPath': plistPath,
+        'tag': tag,
+        'created': created,
+      });
+      if (raw is! Map) return const [];
+      final list = raw['variants'];
+      if (list is! List) return const [];
+      return list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+    } catch (e) {
+      LogService.instance.write(
+        LogLevel.error,
+        'verify',
+        '变体探测异常：$e',
+      );
+      return const [];
+    }
+  }
+
   /// 把编辑分析结果逐条写进日志
   static void logEditingInfo(String prefix, AssetEditingInfo? info) {
     if (info == null) {

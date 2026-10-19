@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 import Network
 import ObjectiveC
 import CryptoKit
+import ImageIO
 
 // MARK: - 崩溃捕获的底层工具（顶层函数）
 //
@@ -289,6 +290,8 @@ private func photoBackupSignalHandler(_ sig: Int32) {
             analyzeAssetEditing(call: call, result: result)
         case "getAssetFullInfo":
             getAssetFullInfo(call: call, result: result)
+        case "probeAdjustmentVariants":
+            probeAdjustmentVariants(call: call, result: result)
         case "deleteAssets":
             deleteAssets(call: call, result: result)
         case "savePhotoWithExtras":
@@ -1184,10 +1187,251 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
     }
 }
 
+// MARK: - 编辑数据变体探测（GAP-R2 最后一轮）
+
+    /// 一轮跑完全部变体，直接给出结论表
+    ///
+    /// ## 背景：四轮实验全部产出坏图
+    ///
+    /// ```
+    /// 1. 编辑指令 → rawValue(7)                       → 黑图
+    /// 2. .aae → .adjustmentData(7)                    → 纯灰白
+    /// 3. plist → .adjustmentData(7)，渲染图交回 iOS   → 灰白
+    /// 4. 补 [16].aae，副本四槽与原图逐槽一致          → 仍然灰白
+    /// ```
+    ///
+    /// 第 4 轮排除了结构因素。剩下最可能的是 plist 里的字段与新建资产对不上，
+    /// 尤其 `adjustmentTimestamp` —— 它记的是原图被编辑那一刻的时间。
+    ///
+    /// ## 为什么不一轮只试一个变体
+    ///
+    /// 那样每次都要装包 + 跑验证 + 肉眼判图，四轮下来代价太大。
+    /// 这里把每个变体各写一个副本（`probe_` 前缀，测完可一键清理），
+    /// 再由 App **自己**判断哪张是真图。
+    ///
+    /// ## 怎么判断「真图」
+    ///
+    /// 把 iOS 生成的 `FullSizeRender.jpg` 缩到 5×5，取 25 个采样点的亮度算方差：
+    ///
+    ///   · 正常照片 → 明暗跨度大，方差上百
+    ///   · 灰白 / 纯黑 → 整张一个色调，方差接近 0
+    ///
+    /// 方差能一眼分开，不用人眼。`requestData` 会回 3302 时按「未生成」处理，
+    /// 区别于「生成了但是一张纯色图」——这两件事结论完全相反。
+    private func probeAdjustmentVariants(
+        call: FlutterMethodCall, result: @escaping FlutterResult
+    ) {
+        guard let args = call.arguments as? [String: Any],
+              let dngPath = args["dngPath"] as? String,
+              let plistPath = args["plistPath"] as? String else {
+            result(["error": "参数不完整"])
+            return
+        }
+        let tag = args["tag"] as? String ?? "probe"
+        guard let plistData = FileManager.default.contents(atPath: plistPath),
+              FileManager.default.fileExists(atPath: dngPath) else {
+            result(["error": "备份里的文件不在本机，先跑一次备份/下载"])
+            return
+        }
+
+        // ---- 变体定义：每个都是「在原 plist 上改一处」----
+        struct Variant {
+            let name: String
+            let note: String
+            let mutate: ([String: Any]) -> [String: Any]
+        }
+        let variants: [Variant] = [
+            Variant(name: "原样", note: "对照组：不改任何字段",
+                    mutate: { $0 }),
+            Variant(name: "时间戳改今天", note: "adjustmentTimestamp → 当前时刻",
+                    mutate: { m in
+                        var m = m
+                        m["adjustmentTimestamp"] = Date()
+                        return m
+                    }),
+            Variant(name: "基图版本 1", note: "adjustmentBaseVersion 0 → 1",
+                    mutate: { m in
+                        var m = m
+                        m["adjustmentBaseVersion"] = 1
+                        return m
+                    }),
+            Variant(name: "时间戳+版本", note: "两处一起改",
+                    mutate: { m in
+                        var m = m
+                        m["adjustmentTimestamp"] = Date()
+                        m["adjustmentBaseVersion"] = 1
+                        return m
+                    }),
+            Variant(name: "渲染类型 0", note: "adjustmentRenderTypes → 0",
+                    mutate: { m in
+                        var m = m
+                        m["adjustmentRenderTypes"] = 0
+                        return m
+                    }),
+        ]
+
+        guard let base = (try? PropertyListSerialization.propertyList(
+            from: plistData, options: [], format: nil)) as? [String: Any] else {
+            result(["error": "plist 解析失败，不是合法的 property list"])
+            return
+        }
+
+        var rows: [[String: Any]] = []
+        var vi = 0
+
+        func runNext() {
+            guard vi < variants.count else {
+                DispatchQueue.main.async {
+                    result(["variants": rows, "total": variants.count])
+                }
+                return
+            }
+            let v = variants[vi]
+            vi += 1
+
+            guard var data = try? PropertyListSerialization.data(
+                fromPropertyList: v.mutate(base),
+                format: .xml,
+                options: 0
+            ) else {
+                rows.append([
+                    "name": v.name, "note": v.note,
+                    "status": "序列化失败", "variance": -1, "bytes": 0,
+                ])
+                runNext()
+                return
+            }
+
+            let name = "probe_\(tag)_\(vi)_\(v.name.replacingOccurrences(of: " ", with: ""))"
+            let tmp = FileManager.default.temporaryDirectory
+                .appendingPathComponent("\(name).plist")
+            do {
+                try data.write(to: tmp, options: .atomic)
+            } catch {
+                rows.append([
+                    "name": v.name, "note": v.note,
+                    "status": "落盘失败", "variance": -1, "bytes": 0,
+                ])
+                runNext()
+                return
+            }
+
+            let creationDate = Date(timeIntervalSince1970: (args["created"] as? Double) ?? 0)
+            var placeholderID: String = ""
+            PHPhotoLibrary.shared().performChanges({
+                let request = PHAssetCreationRequest.forAsset()
+                request.creationDate = creationDate
+                request.addResource(with: .photo, fileURL: URL(fileURLWithPath: dngPath),
+                                    options: nil)
+                request.addResource(with: .adjustmentData, fileURL: tmp, options: nil)
+                placeholderID = request.placeholderForCreatedAsset.localIdentifier
+            }, completionHandler: { success, error in
+                guard success, !placeholderID.isEmpty else {
+                    rows.append([
+                        "name": v.name, "note": v.note,
+                        "status": "写入失败: \(error?.localizedDescription ?? "未知")",
+                        "variance": -1, "bytes": 0,
+                    ])
+                    runNext()
+                    return
+                }
+                // iOS 生成派生图是异步的，先给它时间
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                    Self.judgeRebuilt(
+                        assetId: placeholderID, name: v.name, note: v.note,
+                        rows: { row in
+                            rows.append(row)
+                            runNext()
+                        })
+                }
+            })
+        }
+
+        AppDelegate.appendLogLine(
+            "[info] 开始探测编辑数据变体 tag=\(tag) 共 \(variants.count) 组")
+        runNext()
+    }
+
+    /// 读某个副本 iOS 自己生成的渲染图，用亮度方差判「真图 / 纯色图」
+    private static func judgeRebuilt(
+        assetId: String, name: String, note: String,
+        rows: (([String: Any]) -> Void)
+    ) {
+        let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [assetId], options: nil)
+        guard let asset = fetch.firstObject,
+              let render = PHAssetResource.assetResources(for: asset)
+                .first(where: { $0.type == .fullSizePhoto }) else {
+            rows([
+                "name": name, "note": note,
+                "status": "副本里没有 fullSizePhoto 渲染图", "variance": -1,
+            ])
+            return
+        }
+        let opts = PHAssetResourceRequestOptions()
+        opts.isNetworkAccessAllowed = true
+        PHAssetResourceManager.default().requestData(
+            for: render, options: opts,
+            dataReceivedHandler: { _ in },
+            completionHandler: { error, data in
+                if let error = error {
+                    rows([
+                        "name": name, "note": note,
+                        "status": "读不到渲染图: \(error.localizedDescription)",
+                        "variance": -1,
+                    ])
+                    return
+                }
+                guard let data = data else {
+                    rows([
+                        "name": name, "note": note,
+                        "status": "渲染图为空", "variance": -1,
+                    ])
+                    return
+                }
+                let v = Self.brightnessVariance(data)
+                rows([
+                    "name": name, "note": note,
+                    "bytes": data.count,
+                    "variance": v ?? -1,
+                    "status": v == nil ? "解码失败"
+                        : (v! < 60 ? "**纯色图（重建失败）**" : "正常图像"),
+                ])
+            }
+        )
+    }
+
+    /// 把图片缩到 5×5，算 25 个采样点的亮度方差
+    ///
+    /// 正常照片明暗跨度大，方差上百；灰白或纯黑整张一个色调，方差接近 0。
+    /// 阈值 60 是经验值：真实照片即使很平也不会低于这个数。
+    private static func brightnessVariance(_ data: Data) -> Double? {
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil),
+              let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
+            return nil
+        }
+        let n = 5
+        guard let ctx = CGContext(
+            data: nil, width: n, height: n, bitsPerComponent: 8,
+            bytesPerRow: n * 4, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        ctx.interpolationQuality = .medium
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: n, height: n))
+        guard let base = ctx.data else { return nil }
+        let buf = base.bindMemory(to: UInt8.self, capacity: n * n * 4)
+        var lums: [Double] = []
+        for i in 0..<(n * n) {
+            let r = Double(buf[i * 4]), g = Double(buf[i * 4 + 1]), b = Double(buf[i * 4 + 2])
+            lums.append(0.299 * r + 0.587 * g + 0.114 * b)
+        }
+        let mean = lums.reduce(0, +) / Double(lums.count)
+        let varSum = lums.reduce(0) { $0 + ($1 - mean) * ($1 - mean) }
+        return varSum / Double(lums.count)
+    }
+
 // MARK: - 照片详情（全量信息 + 资源真实字节）
 
     /// 读取一个资产的**全部**原生信息，供「照片详情」窗口展示。
-    ///
     /// ## 为什么不能直接复用导出诊断里的 resources
     ///
     /// 那份明细的 `fileSize` 恒为 0 —— `PHAssetResource` 没有公开的文件大小

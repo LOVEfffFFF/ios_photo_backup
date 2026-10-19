@@ -419,6 +419,12 @@ class VerifyManager {
         await _checkRebuiltRender(record, restoredId);
       }
 
+      // ---- ④a-3 编辑数据变体探测（GAP-R2 最后一轮）----
+      //
+      // 只对「RAW 主文件 + 备份里有编辑指令」的资产有意义 ——
+      // 普通 HEIC 照片没有这套东西，跑了也只是浪费一轮。
+      await _probeVariants(record, mainPath, client, tempDir);
+
       // ---- ④b 编辑（滤镜）信息对比 ----
       // 这是「滤镜对不对」的决定性证据：哈希一致说明编辑指令一个字节没丢，
       // 若显示仍不同，那就是 iOS 不认我们写入的槽位（平台限制）；
@@ -561,6 +567,90 @@ class VerifyManager {
   }
 
   /// 哈希太长，日志里只留前 16 位便于肉眼比对
+  /// 编辑数据变体探测：一次跑完全部变体，输出「哪张是真图」的结论表
+  ///
+  /// 生成的副本以 `probe_` 开头，会留在相册里 —— 用户想亲眼看看哪张是真图。
+  /// 清理按钮要能一并删掉（见 verify_page 的清理逻辑）。
+  static Future<void> _probeVariants(
+    BackupRecord record,
+    String dngPath,
+    ServerClient client,
+    Directory tempDir,
+  ) async {
+    if (!dngPath.toLowerCase().endsWith('.dng')) return;
+    BackupResource? plist;
+    for (final e in record.extraResources) {
+      if (e.role == 'adjustment') {
+        plist = e;
+        break;
+      }
+    }
+    if (plist == null) return;
+
+    final plistLocal =
+        p.join(tempDir.path, 'probe_${p.basename(plist.relativePath)}');
+    try {
+      await client.downloadFile(
+        relativePath: plist.relativePath,
+        targetPath: plistLocal,
+      );
+    } catch (e) {
+      LogService.instance.write(
+        LogLevel.warn,
+        'verify',
+        '变体探测: 编辑指令下载失败，跳过（$e）',
+      );
+      return;
+    }
+
+    LogService.instance.write(
+      LogLevel.info,
+      'verify',
+      '════════ 编辑数据变体探测开始 ════════\n'
+      '    背景：四轮实验（黑图/纯灰白/灰白/逐槽对齐仍灰白）全部失败，\n'
+      '    结构已排除嫌疑。剩下最可能是 plist 字段与新建资产对不上，\n'
+      '    尤其 adjustmentTimestamp（记的是原图被编辑那一刻的时间）。\n'
+      '    每组写一个 probe_ 副本，再按亮度方差自动判定真假图。',
+    );
+
+    final rows = await PhotoLibraryHelper.probeAdjustmentVariants(
+      dngPath: dngPath,
+      plistPath: plistLocal,
+      tag: (record.creationTimestamp.toStringAsFixed(0)),
+      created: record.creationTimestamp,
+    );
+    if (rows.isEmpty) {
+      LogService.instance.write(
+        LogLevel.warn,
+        'verify',
+        '变体探测: 没有结果',
+      );
+      return;
+    }
+
+    final sb = StringBuffer('════════ 变体探测结果 ════════\n');
+    var winner = '';
+    for (final r in rows) {
+      final name = '${r['name'] ?? '?'}';
+      final status = '${r['status'] ?? '?'}';
+      final variance = (r['variance'] as num?)?.toDouble() ?? -1;
+      final bytes = (r['bytes'] as num?)?.toInt() ?? 0;
+      sb.writeln('    ${name.padRight(14)} $status'
+          '${variance >= 0 ? '  方差=${variance.toStringAsFixed(1)}' : ''}'
+          '${bytes > 0 ? '  ${_mb(bytes)}' : ''}');
+      if (variance >= 60 && winner.isEmpty) winner = name;
+    }
+    sb.writeln(winner.isEmpty
+        ? '    → 全部变体都渲染失败：plist 字段假设不成立，得换思路（逆向/换主文件）'
+        : '    → **可用变体：$winner**（方差阈值 60 以上判为真图）');
+    sb.writeln('    副本以 probe_ 开头留在相册，可自行肉眼复核。');
+    LogService.instance.write(
+      winner.isEmpty ? LogLevel.warn : LogLevel.info,
+      'verify',
+      sb.toString(),
+    );
+  }
+
   static String _short(String? sha) =>
       (sha == null || sha.isEmpty) ? '(无)' : '${sha.substring(0, 16)}…';
 
