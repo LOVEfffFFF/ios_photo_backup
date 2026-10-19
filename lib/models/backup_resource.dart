@@ -96,7 +96,14 @@ class BackupResource {
         /// ```
         ///
         // 剩下的渲染图**交回给 iOS 自己生成**（见下面 render 分支）。
-        return 'adjustmentData';
+        //
+        // ⚠ 这里发的是 **restoreType 字面量**，Swift 侧
+        // `phAssetResourceType(forRestoreType:)` 按字符串匹配，**两边没有
+        // 编译期检查**。实验三里这里一度写成 `'adjustmentData'`，而 Swift
+        // 只认 `'adjustmentPlist'`，于是静默落进 `default` 被映射成
+        // `.alternatePhoto`(4) —— 实验压根没跑起来就交了一份残缺副本。
+        // 两侧字面量必须一致；Swift 的 default 分支现在也会留痕告警。
+        return 'adjustmentPlist';
       case 'pairedVideo':
         return 'pairedVideo';
       case 'raw':

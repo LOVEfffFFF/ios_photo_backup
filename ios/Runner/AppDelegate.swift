@@ -1087,9 +1087,22 @@ private func savePhotoWithExtras(call: FlutterMethodCall, result: @escaping Flut
 /// 降级到只写主文件才成功），副本反而只剩 1 个资源。
 /// 所以 render 必须走 `.alternatePhoto`，见 `BackupResource.restoreType`。
 private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetResourceType? {
+    // ## 这里踩过一次「字符串对不上」的坑
+    //
+    // Dart 侧发的是 restoreType 字符串（`BackupResource.restoreType`），
+    // 两边靠字面量对齐，**没有编译期检查**。实验三里 Dart 改成了
+    // `"adjustmentData"`，而这个 switch 只认 `"adjustmentPlist"` ——
+    // 于是**静默落进 default**，被映射成 `.alternatePhoto`(4)，
+    // 实验根本没跑起来，交了一份残缺副本还看不出原因。
+    //
+    // 所以 default 分支现在必须留痕：非预期值进来要在日志里看得见。
     switch kind {
-    case "adjustmentEnvelope", "adjustmentPlist":
-        // Adjustments.plist / .aae —— 编辑指令与数据。
+    case "auto", "adjustmentEnvelope":
+        // `auto` = Dart 侧主动要求「不写这个资源，交回 iOS 自己去生成」。
+        // `adjustmentEnvelope` = 旧记录里 .aae 的兜底，同样交回。
+        return nil
+    case "adjustmentPlist":
+        // Adjustments.plist → 官方槽位 `.adjustmentData`（实测 rawValue 7）
         //
         // ## 槽位真值（2026-10-19 实测，Apple 文档不提供 rawValue）
         //
@@ -1133,13 +1146,6 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
         // 交回之后，副本里唯一能显示的就是 iOS 自己的重建结果，
         // **成功即原样，失败即空白**，一眼可判。
         return .adjustmentData
-    case "auto":
-        // Dart 侧显式要求「不写这个资源，交回 iOS 自己去生成」。
-        // 返回 nil 让调用方跳过；这不是错误，调用方会区别于警告单独记一条。
-        return nil
-    case "adjustmentEnvelope":
-        // 旧兜底：.aae 没有对应槽位，且实测写进去会让 iOS 渲染出纯色图。
-        return nil
     case "pairedVideo":
         return .pairedVideo
     case "fullSizePhoto":
@@ -1151,6 +1157,9 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
     case "fullSizeVideo":
         return .fullSizeVideo
     default:
+        AppDelegate.appendLogLine(
+            "[warn] 未识别的 restoreType=\(kind)，按 .alternatePhoto 处理"
+            + "（Dart 与 Swift 的字面量可能对不上）")
         return .alternatePhoto
     }
 }
