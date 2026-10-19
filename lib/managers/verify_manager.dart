@@ -614,11 +614,11 @@ class VerifyManager {
       return;
     }
 
-    // 副本里 iOS 自己渲染的那张
+    // 副本里的显示图：可能是 iOS 自己重建的（type 5 fullSizePhoto），
+    // 也可能是我们写进去的（type 4 alternatePhoto，当前采用的方案）。
     AssetResourceDetail? got;
     for (final r in info.resources) {
-      if (r.typeRawValue == 5 ||
-          r.uti == 'public.jpeg' && r.filename.startsWith('FullSizeRender')) {
+      if (r.typeRawValue == 5 || r.typeRawValue == 4) {
         got = r;
         break;
       }
@@ -627,7 +627,7 @@ class VerifyManager {
       LogService.instance.write(
         LogLevel.warn,
         'verify',
-        '渲染图重建校验: 副本里**没有** iOS 生成的渲染图'
+        '渲染图校验: 副本里**没有可显示的图像资源**'
         '（资源共 ${info.resourceCount} 个：'
         '${info.resources.map((e) => 'type(${e.typeRawValue})/${e.filename}').join(' · ')}）',
       );

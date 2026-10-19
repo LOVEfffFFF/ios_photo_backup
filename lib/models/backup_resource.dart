@@ -76,58 +76,38 @@ class BackupResource {
   /// 注：2026-10-18 起新备份的 ProRAW 走的是「DNG 当主文件」的路，
   /// 根本不会进 extraResources；本分支是**旧记录的兜底**。
   String get restoreType {
+    // ## 编辑指令一律不写回去（GAP-R2 已验证：公开 API 走不通）
+    //
+    // 四轮实验，全部产出坏图：
+    //
+    //  1. 编辑指令 → `rawValue(7)`                    → 黑图
+    //  2. `.aae` → `.adjustmentData`(7)                → 纯灰白
+    //  3. plist → `.adjustmentData`(7)，渲染图交回 iOS → 灰白
+    //  4. 补上 `[16].aae`，副本四槽与原图**逐槽一致**   → 仍然灰白
+    //
+    // 第 4 轮是关键：结构已完全对齐，iOS 也确实重建出了
+    // `FullSizeRender.jpg`，但渲染结果依然错。说明问题**不在结构**，
+    // 而在 iOS 对编辑数据的内部校验 —— plist 里的 `adjustmentTimestamp`
+    // 指向原图被编辑的那一刻，而我们的副本是新建资产，
+    // 这类私有状态无法伪造。
+    //
+    // 所以编辑指令一律交回 iOS（`auto`）：不写就不会写坏。
+    // **少东西远好过把东西写坏。**
     switch (role) {
       case 'adjustmentAAE':
-        // .aae → 原图所在的 16 号槽（**不再舍弃**）
-        //
-        // 原图实测结构：
-        /// ```
-        /// [1/photo]DNG · [7/adjustmentData]Adjustments.plist
-        ///       · [16].aae · [5/fullSizePhoto]FullSizeRender.jpg
-        /// ```
-        //
-        // 之前一直把 .aae 交回 iOS（restoreType=auto），副本少了 16 号这一槽，
-        // 结构就没能和原图完全对齐 —— 而结构对齐恰恰是前三次
-        // （黑图 / 纯灰白）失败的头号嫌疑。
-        //
-        // ⚠ 16 号在 PHAssetResourceType 里**没有对应的 Swift 枚举成员**，
-        // 只能按 rawValue 构造。值取自原图实测（那张照片的 .aae 确实在 16 号槽），
-        // 不是猜的。写入失败会走降级阶梯，不影响主文件与已有资源。
-        return 'adjustmentEnvelope';
       case 'adjustment':
-        // Adjustments.plist → 官方槽位 `.adjustmentData`（实测 rawValue 7）
-        //
-        // 这一条与原图结构**逐槽一致**：
-        /// ```
-        /// 原图：[1/photo]DNG · [7]Adjustments.plist · [16].aae
-        ///       · [5/fullSizePhoto]FullSizeRender.jpg
-        /// ```
-        ///
-        // 剩下的渲染图**交回给 iOS 自己生成**（见下面 render 分支）。
-        //
-        // ⚠ 这里发的是 **restoreType 字面量**，Swift 侧
-        // `phAssetResourceType(forRestoreType:)` 按字符串匹配，**两边没有
-        // 编译期检查**。实验三里这里一度写成 `'adjustmentData'`，而 Swift
-        // 只认 `'adjustmentPlist'`，于是静默落进 `default` 被映射成
-        // `.alternatePhoto`(4) —— 实验压根没跑起来就交了一份残缺副本。
-        // 两侧字面量必须一致；Swift 的 default 分支现在也会留痕告警。
-        return 'adjustmentPlist';
+        return 'auto';
       case 'pairedVideo':
         return 'pairedVideo';
       case 'raw':
         return 'fullSizePhoto';
       case 'render':
-        // ProRAW 的渲染图（FullSizeRender.jpg）→ **不写，交回 iOS 自己生成**
+        // ProRAW 的渲染图 → `.alternatePhoto`（实测唯一写得进去的槽）
         //
-        // 原图里这张图是 iOS 根据 `.photo` 的 DNG + [7] 的编辑指令
-        // **自己渲染出来的**，放在 [5] fullSizePhoto 槽。
-        // 我们自己塞一张进去（写 5 号槽会被 3300 整批拒收，
-        // 写 4 号 alternatePhoto 虽能过，但会掩盖「指令配对到底成没成」——
-        // 失败了也会看到一张图，分不清是谁的锅）。
-        //
-        // 交回 iOS 之后，副本里唯一能显示的就是它自己重建的渲染图，
-        // **成功与否一眼可判**：重建成功就是原样，重建失败就是空白/纯色。
-        return 'auto';
+        // 写 `.fullSizePhoto`(5) 会被 `PHPhotosErrorDomain 3300` 整批拒收；
+        // 写 `.alternatePhoto`(4) 成功，副本因此仍能显示成原图编辑后的样子
+        // —— 虽然不是可编辑的 ProRAW，但**看起来是对的**。
+        return 'alternate';
       default:
         return 'alternate';
     }
