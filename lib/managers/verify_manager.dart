@@ -578,14 +578,14 @@ class VerifyManager {
     Directory tempDir,
   ) async {
     if (!dngPath.toLowerCase().endsWith('.dng')) return;
-    BackupResource? plist;
-    for (final e in record.extraResources) {
-      if (e.role == 'adjustment') {
-        plist = e;
-        break;
-      }
-    }
-    if (plist == null) return;
+    // 不写 `BackupResource?` —— 那个类型在 backup_resource.dart，
+    // 本文件没引它，显式声明就得加 import（CI 报过 'BackupResource' isn't a type）。
+    // 这里用 where + first 让类型自己推断出来，少一处跨文件耦合。
+    // （没用 firstOrNull：它在 package:collection 里，本文件不一定引了。）
+    final plists =
+        record.extraResources.where((e) => e.role == 'adjustment');
+    if (plists.isEmpty) return;
+    final plist = plists.first;
 
     final plistLocal =
         p.join(tempDir.path, 'probe_${p.basename(plist.relativePath)}');
