@@ -11,6 +11,7 @@ import '../managers/backup_manager.dart';
 import '../managers/restore_manager.dart';
 import '../managers/record_store.dart';
 import '../services/log_service.dart';
+import '../services/qr_scanner.dart';
 import '../services/server_client.dart';
 import '../services/server_config.dart';
 import 'compare_page.dart';
@@ -35,6 +36,7 @@ class _MainPageState extends State<MainPage> {
   final TextEditingController _limitController = TextEditingController();
   ServerConfig _config = ServerConfig.empty;
   bool _testing = false;
+  bool _scanning = false;
   bool _connectionOk = false;
   String? _connectionHint;
 
@@ -253,6 +255,49 @@ class _MainPageState extends State<MainPage> {
     } else {
       _addLog('❌ 上传诊断日志失败：$error');
     }
+  }
+
+  /// 扫码配置：扫电脑屏幕上的配对二维码，自动填地址与访问密钥
+  ///
+  /// 只负责「填输入框」，不跳过「保存并测试连接」—— 让连接结果摆在前台，
+  /// 扫完就知道通不通，避免把不通的配置存下去后面全批失败。
+  Future<void> _scanQrCode() async {
+    if (_scanning || _isOperating) return;
+    setState(() => _scanning = true);
+    try {
+      final info = await QrScanner.scan();
+      if (!mounted) return;
+      if (info == null) {
+        _addLog('已取消扫码');
+        return;
+      }
+      _addressController.text = info.address;
+      _tokenController.text = info.token;
+      setState(() {
+        _connectionOk = false;
+        _connectionHint = '已填入 ${info.address}，点「保存并测试连接」验证';
+      });
+      _addLog('扫码成功：${info.address}'
+          '${info.token.isEmpty ? '（无访问密钥）' : '（密钥 ${info.token.length} 位）'}');
+    } on QrScanException catch (e) {
+      if (!mounted) return;
+      _addLog('扫码失败：${e.message}');
+      _showSnack(e.message);
+    } on PlatformException catch (e) {
+      // 旧版 App 没有扫码通道时会走到这里（MissingPluginException），
+      // 这时候说「更新 App」比说「扫码失败」有用得多
+      if (!mounted) return;
+      _addLog('扫码失败：${e.message}');
+      _showSnack('当前版本不支持扫码，请更新 App');
+    } finally {
+      if (mounted) setState(() => _scanning = false);
+    }
+  }
+
+  void _showSnack(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
   }
 
   /// 解析输入框里的地址与数量上限，非法时返回 null
@@ -581,10 +626,26 @@ class _MainPageState extends State<MainPage> {
             ),
             const SizedBox(height: 4),
             Text(
-              '在电脑上运行接收端脚本后，把下面地址填成电脑的 IP 或域名',
+              '在电脑上运行接收端脚本后，把下面地址填成电脑的 IP 或域名；'
+              '也可以点「扫码配置」扫电脑屏幕上的配对二维码',
               style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
             ),
-            const SizedBox(height: 14),
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton.icon(
+                onPressed: (_isOperating || _scanning) ? null : _scanQrCode,
+                icon: _scanning
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.qr_code_scanner, size: 20),
+                label: Text(_scanning ? '等待扫码...' : '扫码配置'),
+              ),
+            ),
+            const SizedBox(height: 4),
             TextField(
               controller: _addressController,
               enabled: !_isOperating,

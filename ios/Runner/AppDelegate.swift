@@ -1,5 +1,6 @@
 import UIKit
 import Flutter
+import AVFoundation
 import Photos
 import UniformTypeIdentifiers
 import Network
@@ -80,6 +81,7 @@ private func photoBackupSignalHandler(_ sig: Int32) {
 @objc class AppDelegate: FlutterAppDelegate {
 
     private var photoChannel: FlutterMethodChannel?
+    private var scannerChannel: FlutterMethodChannel?
 
     override func application(
         _ application: UIApplication,
@@ -101,6 +103,15 @@ private func photoBackupSignalHandler(_ sig: Int32) {
                 binaryMessenger: messenger
             )
             photoChannel?.setMethodCallHandler(handlePhotoCall)
+
+            // 注册扫码桥（配对二维码）。扫到的字符串**原样**回传，
+            // pb1|地址|令牌 的解析放在 Dart 侧 —— 格式以后要改（加字段、
+            // 换版本号）不用重新出包测原生部分。
+            scannerChannel = FlutterMethodChannel(
+                name: "com.photobackup/scanner",
+                binaryMessenger: messenger
+            )
+            scannerChannel?.setMethodCallHandler(handleScannerCall)
         }
 
         return super.application(application, didFinishLaunchingWithOptions: launchOptions)
@@ -310,6 +321,46 @@ private func photoBackupSignalHandler(_ sig: Int32) {
                 result(true)
             } else {
                 result(false)
+            }
+        default:
+            result(FlutterMethodNotImplemented)
+        }
+    }
+
+    // MARK: - 扫码配置（配对二维码）
+
+    /// 弹出原生扫码界面，扫到的字符串原样回传（nil = 用户取消）
+    private func handleScannerCall(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+        switch call.method {
+        case "scanQrCode":
+            // 权限先问清楚。被拒绝时若直接弹相机界面，用户看到的是一个
+            // 关不掉的空屏，完全不知道去哪恢复 —— 不如把原因说明白。
+            let status = AVCaptureDevice.authorizationStatus(for: .video)
+            if status == .denied || status == .restricted {
+                DispatchQueue.main.async {
+                    result(FlutterError(
+                        code: "CAMERA_DENIED",
+                        message: "相机权限未开启，请在 设置 → 隐私与安全性 → 相机 中允许本 App 使用",
+                        details: nil))
+                }
+                return
+            }
+            AVCaptureDevice.requestAccess(for: .video) { granted in
+                DispatchQueue.main.async {
+                    if !granted {
+                        result(FlutterError(
+                            code: "CAMERA_DENIED",
+                            message: "相机权限未开启，请在 设置 → 隐私与安全性 → 相机 中允许本 App 使用",
+                            details: nil))
+                        return
+                    }
+                    presentQRScanner(from: self.window?.rootViewController) { text in
+                        // 回传必须回主线程：Flutter 的 result 不是线程安全的
+                        DispatchQueue.main.async {
+                            result(text ?? NSNull())
+                        }
+                    }
+                }
             }
         default:
             result(FlutterMethodNotImplemented)
@@ -2410,4 +2461,187 @@ private func hashAssetResources(call: FlutterMethodCall, result: @escaping Flutt
             return "unknown"
         }
     }
+}
+
+// MARK: - 扫码配置（配对二维码）
+
+/// 全屏扫码界面：相机预览 + 中央取景框，扫到内容立刻回传并关闭。
+///
+/// ## 为什么解析放在 Dart 侧
+/// `pb1|地址|令牌` 这个格式以后还会变（加字段、换版本号），放在原生侧每改一次
+/// 都要重新出包测一遍；这里只负责「把扫到的字符串交出去」。
+///
+/// ## 为什么扫描区域不做裁剪
+/// 电脑屏幕上的码经常压在窗口边缘，裁剪 rectOfInterest 会把它们排除在外。
+/// 代价是会顺手扫到屏幕上的其他码 —— 但那些码不是 pb1| 开头，Dart 侧会拒绝。
+private class QRScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
+
+    /// 扫描结果，只会被调用一次（取消 / 相机起不来时传 nil）
+    var onResult: ((String?) -> Void)?
+
+    private let session = AVCaptureSession()
+    private var previewLayer: AVCaptureVideoPreviewLayer?
+    /// 防重复回传：相机可能在同一时刻报多次识别结果
+    private var answered = false
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .black
+        title = "扫描配对二维码"
+
+        // 扫码是可选操作，任何时候都必须能退出去
+        navigationItem.leftBarButtonItem = UIBarButtonItem(
+            barButtonSystemItem: .cancel,
+            target: self,
+            action: #selector(cancelTapped)
+        )
+
+        let box = UIView(frame: CGRect(x: 0, y: 0, width: 240, height: 240))
+        box.center = view.center
+        box.layer.borderColor = UIColor.white.cgColor
+        box.layer.borderWidth = 2
+        box.layer.cornerRadius = 12
+        view.addSubview(box)
+
+        let hint = UILabel()
+        hint.text = "把电脑屏幕上的二维码放入框内"
+        hint.textColor = .white
+        hint.font = .systemFont(ofSize: 13)
+        hint.textAlignment = .center
+        view.addSubview(hint)
+        hint.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            hint.topAnchor.constraint(equalTo: box.bottomAnchor, constant: 20),
+            hint.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            hint.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 24),
+        ])
+
+        if !setupCamera() {
+            showError("无法启用相机")
+        }
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        // 预览层要跟着界面尺寸走（横竖屏切换、导航栏显隐）
+        previewLayer?.frame = view.layer.bounds
+    }
+
+    /// 组装采集链路。返回 false = 相机不可用（模拟器、硬件故障、被占用）
+    private func setupCamera() -> Bool {
+        guard let device = AVCaptureDevice.default(for: .video),
+              let input = try? AVCaptureDeviceInput(device: device),
+              session.canAddInput(input) else {
+            return false
+        }
+        session.addInput(input)
+
+        let output = AVCaptureMetadataOutput()
+        guard session.canAddOutput(output) else { return false }
+        session.addOutput(output)
+        output.setMetadataObjectsDelegate(self, queue: .main)
+        // 只认二维码：条码没必要扫，还容易被环境里的其他码干扰
+        output.metadataObjectTypes = [.qr]
+
+        let preview = AVCaptureVideoPreviewLayer(session: session)
+        preview.videoGravity = .resizeAspectFill
+        preview.frame = view.layer.bounds
+        view.layer.insertSublayer(preview, at: 0)
+        previewLayer = preview
+        return true
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        // startRunning 是同步阻塞调用（可能几百毫秒），放后台起，
+        // 否则「取消」按钮的按动画都会卡住。AVCaptureSession 本身线程安全。
+        DispatchQueue.global(qos: .userInitiated).async { [session] in
+            session.startRunning()
+        }
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        DispatchQueue.global(qos: .userInitiated).async { [session] in
+            session.stopRunning()
+        }
+    }
+
+    // MARK: - AVCaptureMetadataOutputObjectsDelegate
+
+    func metadataOutput(_ output: AVCaptureMetadataOutput,
+                        didOutput metadataObjects: [AVMetadataObject],
+                        from connection: AVCaptureConnection) {
+        guard !answered else { return }
+        // 只认二维码类型；虽然只开了 .qr，仍按类型再确认一次
+        for object in metadataObjects {
+            guard let code = object as? AVCaptureMetadataMachineReadableCodeObject,
+                  let text = code.stringValue, !text.isEmpty else {
+                continue
+            }
+            finish(text)
+            return
+        }
+    }
+
+    @objc private func cancelTapped() {
+        finish(nil)
+    }
+
+    /// 统一出口：回传结果 + 关闭界面，保证只发生一次
+    private func finish(_ text: String?) {
+        guard !answered else { return }
+        answered = true
+        let callback = onResult
+        onResult = nil
+        DispatchQueue.main.async {
+            self.dismiss(animated: true) {
+                callback?(text)
+            }
+        }
+    }
+
+    private func showError(_ message: String) {
+        let label = UILabel()
+        label.text = message
+        label.textColor = .white
+        label.numberOfLines = 0
+        label.textAlignment = .center
+        label.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            label.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            label.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 32),
+            label.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -32),
+        ])
+        // 相机起不来时用户除了返回没有别的选择，2 秒后自动关掉，
+        // 省得对着一个空界面不知道该点哪
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            self?.finish(nil)
+        }
+    }
+}
+
+/// 弹出扫码界面。completion 一定会被调用（nil = 取消 / 失败），不会挂住调用方。
+private func presentQRScanner(from root: UIViewController?, completion: @escaping (String?) -> Void) {
+    guard let top = topViewController(from: root) else {
+        completion(nil)
+        return
+    }
+    let scanner = QRScannerViewController()
+    scanner.onResult = completion
+    let nav = UINavigationController(rootViewController: scanner)
+    nav.modalPresentationStyle = .fullScreen
+    top.present(nav, animated: true, completion: nil)
+}
+
+/// 顺着 presentedViewController 找到当前最上层的界面。
+/// Flutter 引擎的根控制器上可能还压着对话框、其他模态页，直接 present 会冲突。
+private func topViewController(from vc: UIViewController?) -> UIViewController? {
+    guard var top = vc else { return nil }
+    while let presented = top.presentedViewController, !presented.isBeingDismissed {
+        top = presented
+    }
+    return top
 }

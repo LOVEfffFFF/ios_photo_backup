@@ -24,7 +24,7 @@ class AppInfo {
   /// 只有本地或临时构建才会退回下面这个手写默认值。
   static const String build = String.fromEnvironment(
     'BUILD_TAG',
-    defaultValue: '2026-10-18-21:40',
+    defaultValue: '2026-10-21-11:05',
   );
 
 
