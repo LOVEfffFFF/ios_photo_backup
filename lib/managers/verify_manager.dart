@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
@@ -6,6 +7,7 @@ import 'package:path/path.dart' as p;
 import '../helpers/file_helper.dart';
 import '../helpers/photo_library_helper.dart';
 import '../models/backup_record.dart';
+import '../models/photo_filter_info.dart';
 import '../services/manifest_index.dart';
 import '../services/server_client.dart';
 import '../services/log_service.dart';
@@ -419,11 +421,15 @@ class VerifyManager {
         await _checkRebuiltRender(record, restoredId);
       }
 
-      // ---- ④a-3 编辑数据变体探测（GAP-R2 最后一轮）----
+      // ---- ④a-3 编辑数据变体探测：已停用 ----
       //
-      // 只对「RAW 主文件 + 备份里有编辑指令」的资产有意义 ——
-      // 普通 HEIC 照片没有这套东西，跑了也只是浪费一轮。
-      await _probeVariants(record, mainPath, client, tempDir);
+      // 它测的是「改写 plist 里 adjustmentTimestamp 等字段能否让 iOS
+      // 重建成功」。2026-10-20 已确认这条路走不通（oi 仓库在真机上试过
+      // 文件时间、资源 import date、request import date、request
+      // modification date、unmanagedAdjustment.adjustmentTimestamp
+      // 五类，全部被 iOS 按拍摄时间重置），而真正的问题是槽位映射。
+      // 映射修好后（配方→.adjustmentData、渲染图→.fullSizePhoto、成对提交）
+      // 不再需要往相册里灌 probe_ 副本。函数保留备查，不再调用。
 
       // ---- ④b 编辑（滤镜）信息对比 ----
       // 这是「滤镜对不对」的决定性证据：哈希一致说明编辑指令一个字节没丢，
@@ -736,16 +742,65 @@ class VerifyManager {
       return;
     }
 
+    // ## 体积比不再是"重建成功"的证据
+    //
+    // 以前渲染图**不写**回相册（restoreType=auto），副本里唯一能显示的
+    // 就是 iOS 现场重建的结果，于是"体积掉到零头"确实能说明重建失败。
+    //
+    // 现在渲染图写进 `.fullSizePhoto`（真机验证过的正确组合），副本里的
+    // 显示图**就是我们写进去的那张** —— 体积自然和备份一致，再拿它当
+    // 证据就是循环论证。所以这里只报事实，不给结论。
     final ratio = got.bytes / expect;
-    // 同一张照片的 JPEG，体积差几成很正常；掉到零头基本就是空白图
-    final ok = ratio > 0.5;
     LogService.instance.write(
-      ok ? LogLevel.info : LogLevel.warn,
+      LogLevel.info,
       'verify',
-      '渲染图重建校验: 备份渲染图 ${_mb(expect)}'
-      ' / 副本 iOS 重建 ${_mb(got.bytes)}'
+      '副本显示图: 备份渲染图 ${_mb(expect)}'
+      ' / 副本 ${_mb(got.bytes)}'
       ' = ${(ratio * 100).toStringAsFixed(1)}%'
-      '\n    ${ok ? "体积正常 → iOS 用上了这份编辑指令，配对成功" : "**体积异常** → 重建出来的多半是空白/纯色图，指令与基图没配上"}',
+      '（这是渲染图随备份写入的结果，**不能**用来判断 iOS 是否重建成功）',
+    );
+
+    // 真正能判定的只有配方本身：把副本里的 adjustmentData 解出来，
+    // 看编辑操作还在不在。iOS 导入时会把 adjustmentTimestamp 重置成
+    // 拍摄时间（字节必然不同），但操作一致就说明编辑数据被接受了。
+    AssetResourceDetail? recipeRes;
+    for (final r in info.resources) {
+      if (r.isAdjustment && r.base64.isNotEmpty && !r.inlineTruncated) {
+        recipeRes = r;
+        break;
+      }
+    }
+    if (recipeRes == null) {
+      LogService.instance.write(
+        LogLevel.warn,
+        'verify',
+        '编辑配方校验: 副本里没有可读的编辑配方资源'
+        '（资源共 ${info.resourceCount} 个：'
+        '${info.resources.map((e) => 'type(${e.typeRawValue})/${e.filename}').join(' · ')}）'
+        '\n    → 配方没写进相册，滤镜会丢',
+      );
+      return;
+    }
+
+    PhotoFilterInfo filter;
+    try {
+      filter = PhotoFilterInfo.fromPlistText(
+        utf8.decode(base64Decode(recipeRes.base64), allowMalformed: true),
+      );
+    } catch (e) {
+      filter = PhotoFilterInfo.unknown('副本配方解码失败（$e）');
+    }
+    final parsed = filter.signature != null;
+    LogService.instance.write(
+      parsed ? LogLevel.info : LogLevel.warn,
+      'verify',
+      '编辑配方校验: 副本 ${recipeRes.filename}'
+      ' (${_mb(recipeRes.bytes)}, type ${recipeRes.typeRawValue})'
+      '\n    滤镜=${filter.display}  操作数=${filter.operationCount}'
+      '\n    ${parsed
+          ? "配方可解析 → 编辑数据被相册接受"
+            "（字节会因 adjustmentTimestamp 重置而不同，属正常，别按字节判失败）"
+          : "**配方不可解析** → 编辑数据被拒绝或损坏，副本画面可能不对"}',
     );
   }
 

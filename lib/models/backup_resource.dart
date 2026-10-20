@@ -59,57 +59,57 @@ class BackupResource {
 
   /// 恢复时这个资源该用什么 PHAssetResourceType 写入
   ///
-  /// 我们刻意**按 UTI 判断而不是记 type 数字**：PHAssetResourceType 在不同
-  /// iOS 版本上成员有增减（实测 poster / type16 就不在公开枚举里），
-  /// 而 UTI 是稳定的。写入时按下面的映射挑一个「语义正确」的 type。
+  /// ## 槽位真值（真机 SDK 枚举，2026-10-20 校正）
   ///
-  /// ## 为什么 raw 不再映射成 alternatePhoto
+  /// ```
+  /// 1 photo       2 video        3 audio          4 alternatePhoto
+  /// 5 fullSizePhoto             6 fullSizeVideo  7 adjustmentData
+  /// 8 adjustmentBasePhoto       9 pairedVideo   10 fullSizePairedVideo
+  /// 11 adjustmentBasePairedVideo
+  /// ```
   ///
-  /// 旧映射把 `raw` / `adjustment` / `adjustmentAAE` 全映射到
-  /// `alternatePhoto` —— 三个语义完全不同的资源挤进同一个槽位，
-  /// iOS 只能收下一个，其余静默失败。一张带风格的 ProRAW 必然在
-  /// 「RAW 原图」和「编辑指令」之间二选一。
+  /// **7 是公开的 `.adjustmentData`，8 才是 `.adjustmentBasePhoto`（基图槽）。**
+  /// 之前把 7 当成基图槽，才误判成「编辑指令一写就坏图」。
   ///
-  /// 现在：RAW 用 `.fullSizePhoto`（该资产的完整尺寸版本，语义最贴近原图本体），
-  /// `.alternatePhoto` 只留给编辑指令，冲突消失。
+  /// ## 为什么不再一律交回 iOS（`auto`）
   ///
-  /// 注：2026-10-18 起新备份的 ProRAW 走的是「DNG 当主文件」的路，
-  /// 根本不会进 extraResources；本分支是**旧记录的兜底**。
+  /// 2026-10-20 之前这里全部返回 `auto`（不写），依据是四轮实验都是坏图。
+  /// 真因是**槽位映射错了**，不是公开 API 不行：
+  ///
+  ///   · 配方写进 7 号本身没错，但当时误以为 7 是基图槽；
+  ///   · 没有公开创建类型的相机 AAE 被一起硬塞进去；
+  ///   · 渲染图被塞进 `.alternatePhoto`，而不是 `.fullSizePhoto`。
+  ///
+  /// ios_photo_backup_openai 的真机结论（用户已确认副本在系统相册里
+  /// 滤镜名、强度、RAW 标记、还原再编辑全部正常）：
+  ///
+  ///   主文件（DNG）→ `.photo`
+  ///   当前配方      → `.adjustmentData`   ← 必须与渲染图成对
+  ///   渲染图        → `.fullSizePhoto`
+  ///   相机 AAE      → 无公开创建类型，不导入，只留备份
   String get restoreType {
-    // ## 编辑指令一律不写回去（GAP-R2 已验证：公开 API 走不通）
-    //
-    // 四轮实验，全部产出坏图：
-    //
-    //  1. 编辑指令 → `rawValue(7)`                    → 黑图
-    //  2. `.aae` → `.adjustmentData`(7)                → 纯灰白
-    //  3. plist → `.adjustmentData`(7)，渲染图交回 iOS → 灰白
-    //  4. 补上 `[16].aae`，副本四槽与原图**逐槽一致**   → 仍然灰白
-    //
-    // 第 4 轮是关键：结构已完全对齐，iOS 也确实重建出了
-    // `FullSizeRender.jpg`，但渲染结果依然错。说明问题**不在结构**，
-    // 而在 iOS 对编辑数据的内部校验 —— plist 里的 `adjustmentTimestamp`
-    // 指向原图被编辑的那一刻，而我们的副本是新建资产，
-    // 这类私有状态无法伪造。
-    //
-    // 所以编辑指令一律交回 iOS（`auto`）：不写就不会写坏。
-    // **少东西远好过把东西写坏。**
     switch (role) {
-      case 'adjustmentAAE':
+      // 当前编辑配方：写回官方槽位，并与渲染图成对提交
       case 'adjustment':
-        return 'auto';
+        return 'adjustmentData';
+      // 相机内嵌 .aae：原图里占 type(16)，公开枚举没有对应创建类型。
+      // 不能猜编号硬塞 —— `PHAssetResourceType(rawValue: 16)` 返回 nil。
+      case 'adjustmentAAE':
+        return 'cameraEnvelope';
+      // 渲染图：`.fullSizePhoto`(5)。早先写它报 3300 是因为配方没配对，
+      // 不是这个槽不收 —— 三者一次性提交时 iOS 全部接受。
+      case 'render':
+        return 'fullSizePhoto';
       case 'pairedVideo':
         return 'pairedVideo';
+      // 旧记录兜底：2026-10-18 起新备份的 ProRAW 把 DNG 当主文件，
+      // 不会进 extraResources。
       case 'raw':
-        return 'fullSizePhoto';
-      case 'render':
-        // ProRAW 的渲染图 → `.alternatePhoto`（实测唯一写得进去的槽）
-        //
-        // 写 `.fullSizePhoto`(5) 会被 `PHPhotosErrorDomain 3300` 整批拒收；
-        // 写 `.alternatePhoto`(4) 成功，副本因此仍能显示成原图编辑后的样子
-        // —— 虽然不是可编辑的 ProRAW，但**看起来是对的**。
-        return 'alternate';
+        return 'alternatePhoto';
+      case 'alternate':
+        return 'alternatePhoto';
       default:
-        return 'alternate';
+        return 'unsupported';
     }
   }
 

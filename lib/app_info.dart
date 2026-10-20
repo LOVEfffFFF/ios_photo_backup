@@ -8,7 +8,7 @@ class AppInfo {
   const AppInfo._();
 
   /// 语义化版本号（与 pubspec.yaml 的 version 保持一致）
-  static const String version = '1.1.0';
+  static const String version = '1.2.0';
 
   /// 构建标识：编译时间（同一个版本多次编译时用它区分）
   ///

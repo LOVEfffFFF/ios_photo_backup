@@ -1,6 +1,6 @@
 name: photo_backup
 description: iOS 相册备份与恢复工具 - 支持增量备份、Live Photo、WiFi 传输
-version: 1.0.0+1
+version: 1.2.0+2
 publish_to: 'none'
 
 environment:
