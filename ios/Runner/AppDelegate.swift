@@ -883,12 +883,29 @@ private func savePhotoWithExtras(call: FlutterMethodCall, result: @escaping Flut
         + " adjustmentBasePhoto=\(PHAssetResourceType.adjustmentBasePhoto.rawValue)")
 
     // 附加资源：[{restoreType, path, uti, filename}]
-    struct Extra { let type: PHAssetResourceType; let url: URL; let kind: String }
+    //
+    // ## 为什么要带 PHAssetResourceCreationOptions
+    //
+    // 只给 fileURL 时 iOS 只能靠扩展名猜这是什么东西。相机原始 AAE 与
+    // Adjustments.plist 都是 XML plist，猜错的后果是编辑数据被当成别的
+    // 资源收下、或整批被拒。备份里本来就存了 uti 和原始文件名，
+    // 原样交回去是零成本的确定信息（oi 仓库真机验证过这条路径）。
+    struct Extra {
+        let type: PHAssetResourceType
+        let url: URL
+        let kind: String
+        let options: PHAssetResourceCreationOptions
+    }
     var extras: [Extra] = []
+    // 没有公开创建槽位、只能留在备份里的资源（如实计入「部分恢复」）
+    var skipped: [String] = []
     if let list = args["extraResources"] as? [[String: Any]] {
         for item in list {
             guard let p = item["path"] as? String,
-                  FileManager.default.fileExists(atPath: p) else { continue }
+                  FileManager.default.fileExists(atPath: p) else {
+                result(["id": NSNull(), "error": "附加资源缺失，未导入"])
+                return
+            }
             let kind = item["restoreType"] as? String ?? "alternate"
             guard let t = Self.phAssetResourceType(forRestoreType: kind) else {
                 // `auto` 是 Dart 侧**主动要求不写**（交回 iOS 自己生成），
@@ -899,77 +916,65 @@ private func savePhotoWithExtras(call: FlutterMethodCall, result: @escaping Flut
                         "[info] 附加资源按 restoreType=auto 交回 iOS 自己生成"
                         + " 文件=\(URL(fileURLWithPath: p).lastPathComponent)")
                 } else {
-                    // 以前是静默 `continue`：槽位不可用时资源凭空消失，
-                    // 连「少了谁」都查不到。
+                    // 相机 AAE（槽位 16）没有公开创建类型，只能留着。
+                    // 以前是静默 `continue`：资源凭空消失，连「少了谁」都查不到。
+                    skipped.append(kind)
                     AppDelegate.appendLogLine(
-                        "[warn] 附加资源没有可用槽位，已跳过 kind=\(kind)"
+                        "[warn] 附加资源没有公开写入槽位，保留在备份里 kind=\(kind)"
                         + " 文件=\(URL(fileURLWithPath: p).lastPathComponent)")
                 }
                 continue
             }
-            extras.append(Extra(type: t, url: URL(fileURLWithPath: p), kind: kind))
+            if t == .photo {
+                result(["id": NSNull(), "error": "附加资源不能占用主槽位 .photo，未导入"])
+                return
+            }
+            if extras.contains(where: { $0.type == t }) {
+                result(["id": NSNull(), "error": "资源槽位重复 type(\(t.rawValue))，未导入"])
+                return
+            }
+            let options = PHAssetResourceCreationOptions()
+            if let name = item["filename"] as? String, !name.isEmpty {
+                options.originalFilename = URL(fileURLWithPath: name).lastPathComponent
+            }
+            if let uti = item["uti"] as? String, !uti.isEmpty {
+                options.uniformTypeIdentifier = uti
+            }
+            extras.append(Extra(
+                type: t, url: URL(fileURLWithPath: p), kind: kind, options: options))
         }
     }
 
-    // 编辑指令类：iOS 没有公开的枚举成员，写入很可能被拒。
-    // 把它们排到最后，降级时优先舍弃，保住 RAW 原图。
-    let isAdjustment = { (e: Extra) -> Bool in
-        e.kind == "adjustmentPlist" || e.kind == "adjustmentEnvelope"
-    }
-
-    // 同一个 PHAssetResourceType **不能 add 两次** —— iOS 只会收一个，其余被拒。
+    // ## 编辑配方与渲染图必须成对
     //
-    // 实测（2026-10-18，开了风格的 ProRAW）：渲染图、Adjustments.plist、
-    // .aae 三者语义上都落到 .alternatePhoto，三选一，滤镜必然丢。
-    // 所以写入前先按槽位去重，而不是交给 iOS 挑。
+    // iOS 重建最近一次编辑靠的是「指令 + 基图」这一对：配方给出操作，
+    // 渲染图给出当前呈现。只给其中一个，iOS 就自己推一个出来 ——
+    // 推错的结果正是前几轮看到的灰白副本。与其让它猜，不如当场拒绝。
     //
-    // 优先级：非编辑指令 > .aae（iOS 16+ 标准格式）> Adjustments.plist（旧格式）。
-    // 同优先级保持原始顺序，避免每次写入顺序不同导致结果不稳定。
-    let rank: (Extra) -> Int = { e in
-        if !isAdjustment(e) { return 0 }
-        return e.kind == "adjustmentEnvelope" ? 1 : 2
-    }
-    var seenTypes = Set<PHAssetResourceType>()
-    var uniqueExtras: [Extra] = []
-    var conflictDropped: [String] = []
-    let ordered = extras.enumerated()
-        .sorted { a, b in
-            let ra = rank(a.element), rb = rank(b.element)
-            return ra == rb ? a.offset < b.offset : ra < rb
-        }
-        .map { $0.element }
-    for e in ordered {
-        if seenTypes.contains(e.type) {
-            conflictDropped.append("\(e.kind) 被丢弃：槽位 type(\(e.type.rawValue)) 已被占用")
-            continue
-        }
-        seenTypes.insert(e.type)
-        uniqueExtras.append(e)
-    }
-    if !conflictDropped.isEmpty {
+    // ios_photo_backup_openai 的真机结论：三者一次性提交时 iOS 全部接受，
+    // 副本在系统相册里滤镜名、强度、RAW 标记、还原再编辑都正常。
+    let hasRecipe = extras.contains { $0.type == .adjustmentData }
+    let hasRender = extras.contains { $0.type == .fullSizePhoto }
+    if hasRecipe != hasRender {
         AppDelegate.appendLogLine(
-            "[warn] 同槽位冲突，舍弃 \(conflictDropped.count) 个附加资源:"
-            + conflictDropped.joined(separator: "; "))
+            "[error] 编辑配方与渲染图不成对，拒绝导入"
+            + "（有配方=\(hasRecipe) 有渲染图=\(hasRender)）")
+        result(["id": NSNull(), "error": "当前编辑配方与渲染图必须同时存在，未导入"])
+        return
     }
-    let safeExtras = uniqueExtras.filter { !isAdjustment($0) }
-        let aaeExtras = uniqueExtras.filter { $0.kind == "adjustmentEnvelope" }
-        let plistExtras = uniqueExtras.filter { $0.kind == "adjustmentPlist" }
 
         let creationDate = Date(timeIntervalSince1970: creationDateTimeInterval / 1000.0)
 
-        // 逐级降重：全都要 → 逐个剥掉编辑类资源 → 只写主文件
+        // ## 为什么不再逐级降级
         //
-        // 旧实现是三级：全部 → 只留安全资源 → 空。中间那一步一刀切掉**两份**
-        // 编辑指令，于是哪怕只有一份被 iOS 拒收，两份都保不住。
-        // 现在两份编辑指令各占各的槽（.adjustment / .adjustmentBase），
-        // 就有条件「一份被拒还留另一份」——降级粒度必须比资源粒度更细。
-        let attempts: [[Extra]] = [
-          safeExtras + aaeExtras + plistExtras,
-          safeExtras + aaeExtras,
-          safeExtras + plistExtras,
-          safeExtras,
-          [],
-        ]
+        // 旧实现有一条 5 级阶梯：全都要 → 剥掉编辑资源 → 只剩主文件。
+        // 它的前提是「编辑指令必然被拒」，而那个前提来自错误的槽位映射
+        //（把 7 号公开的 .adjustmentData 当成了基图槽）。
+        //
+        // 映射修好后，阶梯反而成了**遮羞布**：iOS 重建失败时悄悄降级成
+        // 只写主文件，恢复照样报"成功"，但滤镜没了还看不出来。
+        // 现在只提交一次，失败就是失败，错误原样交给 Dart。
+        let attempts: [[Extra]] = [extras]
 
     func attempt(_ index: Int, lastError: String?) {
         let batch = attempts[index]
@@ -1006,7 +1011,7 @@ private func savePhotoWithExtras(call: FlutterMethodCall, result: @escaping Flut
             }
             for e in batch {
                 do {
-                    try request.addResource(with: e.type, fileURL: e.url, options: nil)
+                    try request.addResource(with: e.type, fileURL: e.url, options: e.options)
                     AppDelegate.appendLogLine(
                         "[info]   ✓ 附加资源成功 kind=\(e.kind) type=\(e.type.rawValue) 文件=\(e.url.lastPathComponent)"
                     )
@@ -1024,19 +1029,19 @@ private func savePhotoWithExtras(call: FlutterMethodCall, result: @escaping Flut
         } completionHandler: { success, error in
             DispatchQueue.main.async {
                 if success, let id = newId {
-                    let dropped = attempts[0].count - batch.count
                     AppDelegate.appendLogLine(
                         "[info] 写入相册成功 id=\(id)"
-                        + " 实际写入附加=\(batch.count)/\(attempts[0].count) 主动丢弃=\(dropped)"
+                        + " 实际写入附加=\(batch.count)/\(attempts[0].count)"
+                        + " 无公开槽位=\(skipped.count)"
                         + " 期间报错=\(failure ?? "无")"
                     )
                     result([
                         "id": id,
                         "written": batch.count,
-                        "failed": dropped,
-                        "warning": dropped > 0
-                            ? "\(dropped) 个附加资源未被相册接受（编辑指令类），已跳过"
-                            : (failure == nil ? nil : failure!),
+                        "failed": skipped.count,
+                        "warning": skipped.isEmpty
+                            ? (failure == nil ? nil : failure!)
+                            : "\(skipped.joined(separator: "、")) 没有公开写入槽位，只留在备份里",
                         "error": NSNull(),
                     ])
                     return
@@ -1074,21 +1079,31 @@ private func savePhotoWithExtras(call: FlutterMethodCall, result: @escaping Flut
 /// 是有的 —— 早先写成 `.adjustment` 被 CI 拦下，误以为整组都没导出，
 /// 实际只是名字敲错了。
 ///
-/// ## 哪些槽 iOS 真的肯收（实测，别凭语义想当然）
+/// ## 槽位真值（真机 SDK + 设备结果，2026-10-20 校正）
 ///
-/// 2026-10-18 在一台开了风格的 ProRAW iPhone 上逐槽试出来的：
+/// ```text
+/// 1 photo      2 video       3 audio        4 alternatePhoto
+/// 5 fullSizePhoto           6 fullSizeVideo 7 adjustmentData
+/// 8 adjustmentBasePhoto     9 pairedVideo  10 fullSizePairedVideo
+/// 11 adjustmentBasePairedVideo
+/// ```
+///
+/// **7 是公开的 `.adjustmentData`，8 才是 `.adjustmentBasePhoto`（基图槽）。**
+/// 之前把 7 当成基图槽，才得出「编辑指令一写就坏图」的错误结论。
+///
+/// ## 哪种组合 iOS 真的收（ProRAW，DNG 当主文件）
 ///
 /// | 写入内容 | 槽位 | 结果 |
 /// | --- | --- | --- |
 /// | DNG | `.photo` (1) | ✓ |
-/// | JPEG 渲染图 | `.alternatePhoto` (4) | ✓ |
-/// | JPEG 渲染图 | `.fullSizePhoto` (5) | ✗ 整批 **3300** |
-/// | Adjustments.plist / .aae | `.alternatePhoto` (4) | 与 JPEG 撞槽，批内只能留一个 |
+/// | 当前配方 Adjustments.plist | `.adjustmentData` (7) | ✓ |
+/// | 渲染图 FullSizeRender.jpg | `.fullSizePhoto` (5) | ✓ |
+/// | 相机 AAE | 无公开创建类型 | 不导入，留备份 |
 ///
-/// 注意最后两行：**`.fullSizePhoto` 收不下 JPEG**。语义上「完整尺寸版本」听着
-/// 最对，实测却会让 `performChanges` 整批失败（连只带 DNG + JPEG 的两件套也失败，
-/// 降级到只写主文件才成功），副本反而只剩 1 个资源。
-/// 所以 render 必须走 `.alternatePhoto`，见 `BackupResource.restoreType`。
+/// 三者**一次性提交**时 iOS 全部接受（oi 仓库用户已在真机确认副本的
+/// 滤镜名/强度/RAW 标记/还原再编辑均正常）。早先单独写
+/// `.fullSizePhoto` 报 3300，是因为当时主槽位与配方没配对，不是这个槽本身不收。
+/// 配方与渲染图必须成对，见 `savePhotoWithExtras` 里的配对检查。
 private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetResourceType? {
     // ## 这里踩过一次「字符串对不上」的坑
     //
@@ -1101,73 +1116,25 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
     // 所以 default 分支现在必须留痕：非预期值进来要在日志里看得见。
     switch kind {
     case "auto":
-        // Dart 侧显式要求「不写这个资源，交回 iOS 自己去生成」。
-        // 编辑指令目前**全部**走这里 —— 见下面 adjustmentPlist 的说明。
+        // Dart 侧显式要求「不写这个资源，交回 iOS 自己生成」。
         return nil
-    case "adjustmentEnvelope", "adjustmentPlist":
-        // ## 编辑指令不再写回去（GAP-R2 结论）
+    case "cameraEnvelope", "adjustmentEnvelope":
+        // 相机内嵌的 .aae 在原图里占 type(16)，公开枚举**没有**对应的创建
+        // 类型：`PHAssetResourceType(rawValue: 16)` 直接返回 nil。
+        // 它只留在备份里，由调用方计入「部分恢复」，不猜编号硬塞。
+        return nil
+    case "adjustmentData", "adjustmentPlist":
+        // ## 编辑配方 → `.adjustmentData`（rawValue 7）
         //
-        // 四轮实验，全部产出坏图：
-        //   1. `rawValue(7)` 的 plist                       → 黑图
-        //   2. `.aae` → `.adjustmentData`(7)                → 纯灰白
-        //   3. plist → `.adjustmentData`(7)，渲染图交回 iOS → 灰白
-        //   4. 补 `[16].aae`，副本四槽与原图**逐槽一致**     → 仍然灰白
+        // 2026-10-20 更正：这里曾回滚成 `.alternatePhoto`，理由是
+        // "公开 API 走不通、四轮实验全坏图"。那个结论是**错的**，
+        // 错在两处：把 7 号当成 `.adjustmentBasePhoto` 基图槽
+        //（7 其实是公开的 `.adjustmentData`），以及把没有公开创建类型的
+        // 相机 AAE 一起塞了进去。
         //
-        // 第 4 轮排除了结构因素：iOS 确实重建出了 `FullSizeRender.jpg`，
-        // 渲染结果依然错。剩下的是 iOS 对编辑数据的**内部校验**——
-        // plist 里的 `adjustmentTimestamp` 指向原图被编辑的那一刻，
-        // 而副本是新建资产，这类私有状态无法伪造。
-        //
-        // 所以这里退回 `.alternatePhoto`：与渲染图撞槽后由去重逻辑
-        // **主动舍弃**编辑指令。副本 = DNG + 渲染图，
-        // 滤镜丢失，但**画面是好的**。
-        //
-        // 少东西远好过把东西写坏。
-        return .alternatePhoto
-    case "adjustmentPlist":
-        // Adjustments.plist → 官方槽位 `.adjustmentData`（实测 rawValue 7）
-        //
-        // ## 槽位真值（2026-10-19 实测，Apple 文档不提供 rawValue）
-        //
-        // ```
-        // photo=1  alternatePhoto=4  fullSizePhoto=5
-        // adjustmentData=7  adjustmentBasePhoto=8
-        // ```
-        //
-        // ## 两次失败实验（都产出坏图，已回滚）
-        //
-        // **实验一**：编辑指令 → `rawValue(7)`，iOS 收下（副本里出现
-        // `type(7)Adjustments.plist`），副本渲染成**黑图**。
-        //
-        // **实验二**：`.aae` → `.adjustmentData`(7)，写入 `2/2 主动丢弃=0`
-        // 全盘接受，副本渲染成**纯灰白**。
-        //
-        // 两次的共同点：iOS 认下了这份数据，并**自己动手重建**渲染图
-        // （副本里的 `FullSizeRender.jpg` 是它生成的，不是我们写的），
-        // 但重建失败。说明机制是通的，**缺的是让指令与基图正确配对**。
-        //
-        // 为什么配不上 —— 对比原图结构（实测）：
-        //
-        /// ```
-        /// 原图：[1/photo]DNG · [7]Adjustments.plist(uti=com.apple.property-list)
-        ///       · [16].aae · [5/fullSizePhoto]FullSizeRender.jpg
-        /// 我们：[1/photo]DNG · [7].aae · [4/alternatePhoto]渲染图
-        /// ```
-        ///
-        /// 原图的 7 号槽装的是 **Adjustments.plist**（UTI 一致），
-        /// 而我们塞进去的是 `.aae`（UTI 不同），iOS 按 plist 语义去解析
-        /// 一个 envelope 格式，解析出来的东西自然渲染不出画面。
-        ///
-        // ## 现状：按原图结构逐槽复现（实验三）
-        //
-        // 改法：`Adjustments.plist` → `.adjustmentData`（与原图 7 号槽 UTI 一致），
-        // `.aae` 与渲染图都交回 iOS 自己处理。
-        //
-        // 交回渲染图是关键：原图里那张 `FullSizeRender.jpg` 是 iOS 自己
-        // 根据 DNG + 编辑指令渲染出来的。我们塞一张进去，它就成了「遮羞布」——
-        // 就算指令配对全错，副本照样有图可看，分不清成没成。
-        // 交回之后，副本里唯一能显示的就是 iOS 自己的重建结果，
-        // **成功即原样，失败即空白**，一眼可判。
+        // oi 仓库的真机结论：主文件 `.photo` + 配方 `.adjustmentData`
+        // + 渲染图 `.fullSizePhoto` 三者一次性提交即可，副本在系统相册里
+        // 滤镜名、强度、RAW 标记、还原再编辑全部正常。所以配方要写回来。
         return .adjustmentData
     case "pairedVideo":
         return .pairedVideo
@@ -1179,11 +1146,14 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
         return .video
     case "fullSizeVideo":
         return .fullSizeVideo
-    default:
-        AppDelegate.appendLogLine(
-            "[warn] 未识别的 restoreType=\(kind)，按 .alternatePhoto 处理"
-            + "（Dart 与 Swift 的字面量可能对不上）")
+    case "alternate", "alternatePhoto":
         return .alternatePhoto
+    default:
+        // 宁可少写一个资源，也不要把语义不明的东西塞进随便一个槽位。
+        AppDelegate.appendLogLine(
+            "[warn] 未识别的 restoreType=\(kind)，不写入"
+            + "（Dart 与 Swift 的字面量可能对不上）")
+        return nil
     }
 }
 
