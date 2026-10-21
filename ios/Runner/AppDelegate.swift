@@ -2574,8 +2574,18 @@ private class QRScannerViewController: UIViewController, AVCaptureMetadataOutput
                         from connection: AVCaptureConnection) {
         guard !answered else { return }
         // 只认二维码类型；虽然只开了 .qr，仍按类型再确认一次
+        //
+        // ## 2026-10-21 CI 抓到的编译错误
+        //
+        // `AVCaptureMetadataMachineReadableCodeObject` 在 iOS 26 SDK 里已经
+        // **不存在**（error: cannot find type ... in scope），直接写就编不过。
+        // 改走 `AVMetadataMachineReadableCodeObject` —— 它是 iOS 15 起的
+        // 新名字，旧名字是同名的 typealias，两个 SDK 上都能编译。
+        //
+        // 教训与项目里其他 PhotoKit 翻车同源：**类型名不能凭记忆写**，
+        // 这类改名 Apple 不公告，只有 CI 能发现。
         for object in metadataObjects {
-            guard let code = object as? AVCaptureMetadataMachineReadableCodeObject,
+            guard let code = object as? AVMetadataMachineReadableCodeObject,
                   let text = code.stringValue, !text.isEmpty else {
                 continue
             }
