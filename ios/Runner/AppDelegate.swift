@@ -895,6 +895,28 @@ private func photoBackupSignalHandler(_ sig: Int32) {
         return out
     }
 
+    /// 把主资源的原始文件名与 UTI 补进导出结果
+    ///
+    /// ## 为什么必须补
+    ///
+    /// 落盘名是「拍摄时间 + 资产 ID 前 12 位」（`20261108_222035_1024ED87E919.dng`），
+    /// 它只解决「跨设备唯一、不互相覆盖」。可备份完成后，人看着这个文件名
+    /// 根本对不上相册里的 `IMG_7677.DNG` —— 之前只给附加资源带了
+    /// `originalFilename`/`uti`，主文件这两个字段一路为 null，等于把
+    /// 「它本来叫什么」永久丢了。清单是手机沙盒丢失后唯一还能解释备份的地方，
+    /// 这两个字段必须落进清单。
+    ///
+    /// 只做只读的属性读取，不碰资源字节，失败也不影响导出本身。
+    private func attachPrimaryIdentity(
+        _ payload: [String: Any], resource: PHAssetResource?
+    ) -> [String: Any] {
+        guard let resource = resource else { return payload }
+        var out = payload
+        out["primaryFilename"] = resource.originalFilename
+        out["primaryUti"] = resource.uniformTypeIdentifier
+        return out
+    }
+
     // MARK: - 写入照片到相册
 
 /// 写入照片，**并把附加资源一起挂上去**（GAP-R1 / GAP-R2）
@@ -2216,6 +2238,8 @@ private func hashAssetResources(call: FlutterMethodCall, result: @escaping Flutt
                     var payload = self.exportResult(
                         path: mainURL.path, sha256: info.sha256,
                         bytes: info.bytes, summary: summary)
+                    // 主文件的原始文件名与真实 UTI
+                    payload = self.attachPrimaryIdentity(payload, resource: primary)
                     payload["extraResources"] = extraResults
                     payload["failedExtras"] = failedExtras
                     payload["resourceDebug"] = picked.debug
@@ -2302,12 +2326,17 @@ private func hashAssetResources(call: FlutterMethodCall, result: @escaping Flutt
                         .attributesOfItem(atPath: targetURL.path)
                     let bytes = (attrs?[.size] as? NSNumber)?.intValue ?? 0
                     let summary = Self.resourceSummary(asset)
+                    // 视频同样要留原名：磁盘名只有「时间 + 资产 ID」
+                    let mainResource = PHAssetResource.assetResources(for: asset)
+                        .first { $0.type == .video || $0.type == .fullSizeVideo }
                     DispatchQueue.main.async {
-                        result(self.exportResult(
-                            path: targetURL.path,
-                            sha256: hash,
-                            bytes: bytes,
-                            summary: summary))
+                        result(self.attachPrimaryIdentity(
+                            self.exportResult(
+                                path: targetURL.path,
+                                sha256: hash,
+                                bytes: bytes,
+                                summary: summary),
+                            resource: mainResource))
                     }
                 case .failed, .cancelled:
                     print("PhotoBackup: Video export failed: \(session.error?.localizedDescription ?? "unknown")")
@@ -2359,11 +2388,13 @@ private func hashAssetResources(call: FlutterMethodCall, result: @escaping Flutt
                 responded = true
                 switch outcome {
                 case .success(let info):
-                    result(self.exportResult(
-                        path: targetURL.path,
-                        sha256: info.sha256,
-                        bytes: info.bytes,
-                        summary: summary))
+                    result(self.attachPrimaryIdentity(
+                        self.exportResult(
+                            path: targetURL.path,
+                            sha256: info.sha256,
+                            bytes: info.bytes,
+                            summary: summary),
+                        resource: videoResource))
                 case .failure(let error):
                     print("PhotoBackup: Live Photo video export failed: \(error)")
                     result(false)

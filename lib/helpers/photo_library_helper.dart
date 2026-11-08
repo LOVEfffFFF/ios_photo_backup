@@ -814,6 +814,8 @@ class ExportResult {
     this.extraResources = const [],
     this.resourceDebug = const [],
     this.failedExtras = const [],
+    this.primaryFilename = '',
+    this.primaryUti = '',
   });
 
   final String path;
@@ -847,6 +849,16 @@ class ExportResult {
   ///
   /// 约定：以 `summary` 开头的条目是整体统计，不是单个资源。
   final List<Map<String, dynamic>> resourceDebug;
+
+  /// 主文件在 iOS 里的原始文件名（如 `IMG_7677.DNG`）
+  ///
+  /// 磁盘上的名字由「时间 + 资产 ID 前 8 位」组成，是为了跨设备唯一；
+  /// 但「它本来叫什么」是恢复时的依据，也是人核对备份时的唯一线索，
+  /// 所以必须单独记下来，不能只靠文件名顺序猜。
+  final String primaryFilename;
+
+  /// 主文件的真实 UTI（如 `com.adobe.raw-image`）
+  final String primaryUti;
 
   /// 导出失败的附加资源（role / 文件名 / 错误信息）
   ///
@@ -917,6 +929,8 @@ class ExportResult {
     return ExportResult(
       path: path,
       sha256: (raw['sha256'] as String?) ?? '',
+      primaryFilename: (raw['primaryFilename'] as String?) ?? '',
+      primaryUti: (raw['primaryUti'] as String?) ?? '',
       bytes: (raw['bytes'] as num?)?.toInt() ?? 0,
       resourceTotal: (raw['total'] as num?)?.toInt() ?? 0,
       resourcePrimary: splitList(raw['primary']),

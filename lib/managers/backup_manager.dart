@@ -501,6 +501,11 @@ class BackupManager {
         resourceTotal: exportResult.resourceTotal,
         resourcePrimary: exportResult.resourcePrimary,
         resourceAuxiliary: exportResult.resourceAuxiliary,
+        // 主文件在 iOS 里的原始文件名与真实 UTI。
+        // 磁盘名是「时间 + 资产 ID」，只保证唯一；「它本来叫 IMG_7677.DNG」
+        // 只能靠清单里的这两个字段记住，否则备份完就再也对不上相册里的照片。
+        resourceFilename: exportResult.primaryFilename,
+        resourceUti: exportResult.primaryUti,
       );
       if (!result.success) {
         throw Exception(result.message ?? '上传失败');
@@ -615,6 +620,8 @@ class BackupManager {
                       resourceTotal: videoExport.resourceTotal,
                       resourcePrimary: videoExport.resourcePrimary,
                       resourceAuxiliary: videoExport.resourceAuxiliary,
+                      resourceFilename: videoExport.primaryFilename,
+                      resourceUti: videoExport.primaryUti,
                     );
             if (videoResult.success) {
               videoBytes = await videoFile.length();
@@ -699,6 +706,10 @@ class BackupManager {
         resourceTotal: exportResult.resourceTotal,
         resourcePrimary: exportResult.resourcePrimary,
         resourceAuxiliary: exportResult.resourceAuxiliary,
+        // 视频同理：磁盘名只有「时间 + 资产 ID」，原名 `IMG_7677.MOV`
+        // 只能靠清单里的这两个字段记住
+        resourceFilename: exportResult.primaryFilename,
+        resourceUti: exportResult.primaryUti,
       );
       if (!result.success) {
         throw Exception(result.message ?? '上传失败');
