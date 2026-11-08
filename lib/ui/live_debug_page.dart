@@ -4,6 +4,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import '../helpers/photo_library_helper.dart';
 import '../managers/record_store.dart';
 import '../models/backup_record.dart';
+import '../services/debug_bridge_config.dart';
 import '../services/debug_photo_executor.dart';
 import '../services/live_debug_session.dart';
 import '../services/manifest_index.dart';
@@ -36,6 +37,7 @@ class _LiveDebugPageState extends State<LiveDebugPage> with WidgetsBindingObserv
   Future<void> _load() async {
     try {
       final config = await ServerConfig.load();
+      final bridge = await DebugBridgeConfig.load();
       var records = await RecordStore().loadAllRecords();
       if (records.isEmpty && config.isConfigured) {
         records = (await ManifestIndex.fetch(ServerClient(config)))?.toRecords() ?? [];
@@ -45,8 +47,15 @@ class _LiveDebugPageState extends State<LiveDebugPage> with WidgetsBindingObserv
       if (!mounted) return;
       setState(() {
         _records = records; _copyIds = copyIds; _loading = false;
-        _address.text = config.isConfigured
-            ? Uri(scheme: config.scheme, host: config.host, port: 18081).toString() : '';
+        // 优先用配对二维码带下来的调试桥配置（扫一次全填好）；
+        // 没扫过就退化成「同一台电脑的 18081 端口」，连接码仍需手填。
+        if (bridge.isConfigured) {
+          _address.text = bridge.address;
+          _token.text = bridge.token;
+        } else if (config.isConfigured) {
+          _address.text =
+              Uri(scheme: config.scheme, host: config.host, port: 18081).toString();
+        }
       });
     } catch (_) {
       if (mounted) setState(() {_loading = false; _error = '无法读取备份或调试副本记录，请检查电脑连接';});

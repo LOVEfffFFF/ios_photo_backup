@@ -8,11 +8,27 @@ class PairingInfo {
   /// 访问密钥；接收端未启用鉴权时为空串
   final String token;
 
-  const PairingInfo({required this.address, required this.token});
+  /// 调试桥地址（形如 `http://192.168.1.10:18081`）；二维码里没带时为 null
+  final String? debugAddress;
+
+  /// 调试桥连接码（6 位数字）；二维码里没带时为 null
+  final String? debugToken;
+
+  const PairingInfo({
+    required this.address,
+    required this.token,
+    this.debugAddress,
+    this.debugToken,
+  });
+
+  bool get hasDebug =>
+      (debugAddress ?? '').trim().isNotEmpty &&
+      (debugToken ?? '').trim().isNotEmpty;
 
   @override
-  String toString() =>
-      'PairingInfo(address: $address, token: ${token.isEmpty ? '空' : '${token.length} 位'})';
+  String toString() => 'PairingInfo(address: $address, '
+      'token: ${token.isEmpty ? '空' : '${token.length} 位'}'
+      '${hasDebug ? '，调试 $debugAddress' : ''})';
 }
 
 /// 扫码失败：相机不可用，或扫到的内容不是配对码
@@ -46,9 +62,14 @@ class QrScanner {
 
   /// 解析扫到的字符串（纯函数，便于测试）
   ///
-  /// 认两种内容：
-  ///   1. 接收端 /qr 的配对格式：`pb1|地址|令牌`
-  ///   2. 普通 URL（`http://ip:port` / `https://nas.local:8080`），没有令牌
+  /// 认三种内容：
+  ///   1. `pb1|地址|令牌` —— 旧版二维码，只有备份服务器
+  ///   2. `pb2|地址|令牌|调试端口或地址|连接码` —— 一把填好备份与实时调试
+  ///   3. 普通 URL（`http://ip:port` / `https://nas.local:8080`），没有令牌
+  ///
+  /// pb2 的第 4 段可以是纯端口（`18081`），此时主机名沿用第 2 段 ——
+  /// 常见情况是备份接收端和调试桥跑在同一台电脑上，省下十来个字节，
+  /// 二维码版本更低、模块更大，隔着屏幕反而更好扫。
   ///
   /// 为什么不做「猜」：扫到不认识的内容时直接报错，让用户知道扫错了，
   /// 而不是把一堆乱七八糟的字符串填进地址框里、等到连不上才发现。
@@ -57,13 +78,35 @@ class QrScanner {
     if (text.isEmpty) {
       throw const QrScanException('EMPTY', '二维码内容为空');
     }
-    if (text.startsWith('pb1|')) {
+    if (text.startsWith('pb1|') || text.startsWith('pb2|')) {
       final parts = text.split('|');
       if (parts.length < 2 || parts[1].trim().isEmpty) {
         throw const QrScanException('BAD_FORMAT', '配对码缺少地址段');
       }
+      final address = parts[1].trim();
       final token = parts.length >= 3 ? parts[2].trim() : '';
-      return PairingInfo(address: parts[1].trim(), token: token);
+
+      String? debugAddress;
+      String? debugToken;
+      if (text.startsWith('pb2|') && parts.length >= 5) {
+        final debugTarget = parts[3].trim();
+        final code = parts[4].trim();
+        if (debugTarget.isNotEmpty && code.isNotEmpty) {
+          // 只写了端口 → 复用备份地址里的主机名
+          final host = debugTarget.contains(':')
+              ? debugTarget
+              : '${_hostOf(address)}:$debugTarget';
+          debugAddress = host.startsWith('http') ? host : 'http://$host';
+          debugToken = code;
+        }
+      }
+
+      return PairingInfo(
+        address: address,
+        token: token,
+        debugAddress: debugAddress,
+        debugToken: debugToken,
+      );
     }
     if (text.startsWith('http://') || text.startsWith('https://')) {
       final uri = Uri.tryParse(text);
@@ -73,6 +116,16 @@ class QrScanner {
       final address = uri.hasPort ? '${uri.host}:${uri.port}' : uri.host;
       return PairingInfo(address: address, token: '');
     }
-    throw const QrScanException('UNKNOWN', '不是本 App 的配对码（应以 pb1| 开头）');
+    throw const QrScanException('UNKNOWN', '不是本 App 的配对码（应以 pb1| 或 pb2| 开头）');
+  }
+
+  /// 从 `host:port` / `[v6]:port` 里取主机名
+  static String _hostOf(String address) {
+    if (address.startsWith('[')) {
+      final end = address.indexOf(']');
+      if (end > 0) return address.substring(1, end);
+    }
+    final idx = address.lastIndexOf(':');
+    return idx <= 0 ? address : address.substring(0, idx);
   }
 }
