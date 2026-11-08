@@ -1155,6 +1155,20 @@ private func savePhotoWithExtras(call: FlutterMethodCall, result: @escaping Flut
 /// 滤镜名/强度/RAW 标记/还原再编辑均正常）。早先单独写
 /// `.fullSizePhoto` 报 3300，是因为当时主槽位与配方没配对，不是这个槽本身不收。
 /// 配方与渲染图必须成对，见 `savePhotoWithExtras` 里的配对检查。
+/// 相机 AAE 的资源类型：实测 `rawValue == 16`，公开枚举里没有这个名字
+///
+/// `PHAssetResourceType(rawValue:)` 是 Swift 为 NS_ENUM 生成的可失败构造器，
+/// 遇到未定义的原始值直接返回 nil —— 这就是「16 写不进去」的真正原因，
+/// 不是槽位不存在。底层是 NSInteger，用 unsafeBitCast 保留同一个整数值，
+/// 语义等价于 Objective-C 的强制转换。
+///
+/// 若 iOS 侧仍然拒收，`addResource` 会抛 Error 并被上层的 do/catch 接住：
+/// 只丢这一份资源，主文件 / 配方 / 渲染图照常写入。
+private static func cameraEnvelopeResourceType() -> PHAssetResourceType {
+    if let known = PHAssetResourceType(rawValue: 16) { return known }
+    return unsafeBitCast(16, to: PHAssetResourceType.self)
+}
+
 private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetResourceType? {
     // ## 这里踩过一次「字符串对不上」的坑
     //
@@ -1170,10 +1184,23 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
         // Dart 侧显式要求「不写这个资源，交回 iOS 自己生成」。
         return nil
     case "cameraEnvelope", "adjustmentEnvelope":
-        // 相机内嵌的 .aae 在原图里占 type(16)，公开枚举**没有**对应的创建
-        // 类型：`PHAssetResourceType(rawValue: 16)` 直接返回 nil。
-        // 它只留在备份里，由调用方计入「部分恢复」，不猜编号硬塞。
-        return nil
+        // 相机内嵌的 .aae 在原图里占 type(16)，公开枚举**没有**这个成员，
+        // `PHAssetResourceType(rawValue: 16)` 返回 nil。
+        //
+        // 但 16 不是猜的：它是对原图 `PHAssetResource.resourceType` 实测
+        // 出来的值（类型名无法直接打印，只能读 rawValue）。底层类型是
+        // NS_ENUM(NSInteger)，所以用 unsafeBitCast 把同一个整数值还原成
+        // 枚举即可，等价于 Objective-C 里写 `(PHAssetResourceType)16`。
+        //
+        // 为什么以前不写：当时担心「塞错槽 → 整批被拒 → 坏图」。现在
+        // `addResource` 的失败是 Swift Error（可 catch，见上方 do/catch），
+        // 拒收只会让这一份资源不进副本，配方/渲染图/主文件照常写入。
+        //
+        // 为什么必须写：**「还原到原始状态」依赖它**。iOS 的还原按钮回到的是
+        // 「相机拍摄时的编辑记录」，那条记录就存在 type(16) 的 AAE 里。
+        // 只写当前配方（50% 强度）而不写 AAE，副本显示 50%，一点还原就退回
+        // 无滤镜彩色 —— 而原片在相册里还原后是相机拍摄时的效果。
+        return Self.cameraEnvelopeResourceType()
     case "adjustmentData", "adjustmentPlist":
         // ## 编辑配方 → `.adjustmentData`（rawValue 7）
         //
