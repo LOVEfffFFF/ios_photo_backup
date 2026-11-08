@@ -301,6 +301,8 @@ private func photoBackupSignalHandler(_ sig: Int32) {
             analyzeAssetEditing(call: call, result: result)
         case "getAssetFullInfo":
             getAssetFullInfo(call: call, result: result)
+        case "getAssetThumbnails":
+            getAssetThumbnails(call: call, result: result)
         case "probeAdjustmentVariants":
             probeAdjustmentVariants(call: call, result: result)
         case "deleteAssets":
@@ -1489,7 +1491,93 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
         return varSum / Double(lums.count)
     }
 
-// MARK: - 照片详情（全量信息 + 资源真实字节）
+// MARK: - 缩略图与照片详情（全量信息 + 资源真实字节）
+
+    /// 批量取缩略图（base64 JPEG）
+    ///
+    /// 「选择要备份的照片」页必须有缩略图：只有文件名和时间的话，面对几千张
+    /// 根本没法选（用户实测反馈）。这里一次拿一批，Dart 侧按 60 个一批调用。
+    ///
+    /// ## 为什么第一次回调就返回
+    /// `requestImage` 可能先给一张降质图（degraded）再给最终图。等最终图更清晰，
+    /// 但对 iCloud 未下载的资产可能要好几秒 —— 缩略图要的是"立刻看到"，
+    /// 降质图足够分辨是哪张照片。
+    ///
+    /// ## 为什么要超时兜底
+    /// iCloud 资产在无网络时可能长时间不回调。若一直等 pending 归零，
+    /// 整批缩略图会永久挂起；8 秒后把已经拿到的先交回去。
+    private func getAssetThumbnails(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let args = call.arguments as? [String: Any],
+              let ids = args["localIdentifiers"] as? [String], !ids.isEmpty else {
+            result(["items": []])
+            return
+        }
+        // 通道传过来的数字一律是 NSNumber，不是 Dart 的 num
+        let side = (args["size"] as? NSNumber)?.doubleValue ?? 160
+        let quality = (args["quality"] as? NSNumber)?.doubleValue ?? 0.6
+
+        let fetch = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
+        var assets: [PHAsset] = []
+        fetch.enumerateObjects { asset, _, _ in assets.append(asset) }
+        if assets.isEmpty {
+            result(["items": []])
+            return
+        }
+
+        let options = PHImageRequestOptions()
+        options.isSynchronous = false
+        options.deliveryMode = .fast
+        options.resizeMode = .fast
+        options.isNetworkAccessAllowed = true
+
+        let target = CGSize(width: side, height: side)
+        let lock = NSLock()
+        var items: [[String: Any]] = []
+        var pending = assets.count
+        var finished = false
+
+        func finishOne() {
+            lock.lock()
+            pending -= 1
+            let remaining = pending
+            let already = finished
+            if remaining == 0 { finished = true }
+            let payload = items
+            lock.unlock()
+            if remaining == 0 && !already {
+                DispatchQueue.main.async { result(["items": payload]) }
+            }
+        }
+
+        for asset in assets {
+            var delivered = false
+            PHImageManager.default().requestImage(
+                for: asset, targetSize: target, contentMode: .aspectFill, options: options
+            ) { image, _ in
+                lock.lock()
+                let repeated = delivered
+                delivered = true
+                if !repeated, let image = image,
+                   let data = image.jpegData(compressionQuality: quality) {
+                    items.append([
+                        "id": asset.localIdentifier,
+                        "base64": data.base64EncodedString(),
+                    ])
+                }
+                lock.unlock()
+                if !repeated { finishOne() }
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+            lock.lock()
+            let already = finished
+            if !already { finished = true }
+            let payload = items
+            lock.unlock()
+            if !already { result(["items": payload]) }
+        }
+    }
 
     /// 读取一个资产的**全部**原生信息，供「照片详情」窗口展示。
     /// ## 为什么不能直接复用导出诊断里的 resources

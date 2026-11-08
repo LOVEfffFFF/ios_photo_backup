@@ -1,4 +1,6 @@
+import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -321,6 +323,72 @@ class PhotoLibraryHelper {
       );
       return null;
     }
+  }
+
+  /// 批量取缩略图，返回 `localIdentifier → JPEG 字节`
+  ///
+  /// 「选择要备份的照片」页必须有缩略图：面对几千张照片，只给文件名和时间
+  /// 根本没法挑（用户实测反馈）。原生侧一次回调一批 base64 JPEG，
+  /// 这里按 [batchSize]（默认 60）分批走通道 —— 一次塞几千张进 MethodChannel
+  /// 会把主线程卡死，内存也扛不住。
+  ///
+  /// [onBatch] 每批回来就回调一次，UI 可以边下边显示，不必等全部完成。
+  /// 这是「立刻能看到」的关键：几千张图全下完可能要几十秒。
+  ///
+  /// 单批失败不影响其他批次（iCloud 资产需要网络，断网时会整批超时），
+  /// 失败批次只是没有图，格子显示占位符。
+  static Future<Map<String, Uint8List>> fetchThumbnails(
+    List<String> localIdentifiers, {
+    double size = 160,
+    double quality = 0.6,
+    int batchSize = 60,
+    void Function(Map<String, Uint8List> batch)? onBatch,
+  }) async {
+    final all = <String, Uint8List>{};
+    if (localIdentifiers.isEmpty) return all;
+    final step = batchSize <= 0 ? 60 : batchSize;
+
+    for (var start = 0; start < localIdentifiers.length; start += step) {
+      final end = (start + step < localIdentifiers.length)
+          ? start + step
+          : localIdentifiers.length;
+      final slice = localIdentifiers.sublist(start, end);
+      final batch = <String, Uint8List>{};
+      try {
+        final raw = await _channel.invokeMethod('getAssetThumbnails', {
+          'localIdentifiers': slice,
+          'size': size,
+          'quality': quality,
+        });
+        final items = (raw is Map) ? raw['items'] : null;
+        if (items is List) {
+          for (final item in items) {
+            if (item is! Map) continue;
+            final id = item['id'];
+            final b64 = item['base64'];
+            if (id is! String || id.isEmpty || b64 is! String || b64.isEmpty) {
+              continue;
+            }
+            try {
+              batch[id] = base64Decode(b64);
+            } catch (_) {
+              // 单张坏数据（截断的 base64）不该让整批作废
+            }
+          }
+        }
+      } catch (e) {
+        LogService.instance.write(
+          LogLevel.warn,
+          'thumb',
+          '缩略图批次失败 [$start~$end/${localIdentifiers.length}]：$e',
+        );
+      }
+      if (batch.isNotEmpty) {
+        all.addAll(batch);
+        onBatch?.call(batch);
+      }
+    }
+    return all;
   }
 
   /// 一轮跑完编辑数据的所有变体，直接给出「哪张是真图」的结论
