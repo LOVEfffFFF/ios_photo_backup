@@ -1526,7 +1526,10 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
 
         let options = PHImageRequestOptions()
         options.isSynchronous = false
-        options.deliveryMode = .fast
+        // 注意是 `.fastFormat` 而不是 `.fast`：PHImageRequestOptionsDeliveryMode
+        // 只有 opportunistic / highQualityFormat / fastFormat 三种，
+        // resizeMode 才叫 .fast。写错一个词就是整包编译不过（已踩）。
+        options.deliveryMode = .fastFormat
         options.resizeMode = .fast
         options.isNetworkAccessAllowed = true
 
