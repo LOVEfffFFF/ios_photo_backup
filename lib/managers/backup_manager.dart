@@ -67,7 +67,16 @@ class BackupManager {
   ///
   /// [limit] 本次最多处理的资产数量，0 表示不限制。
   /// 主要用于测试：不想一次性把整个相册传完时设一个小值。
-  Stream<BackupProgress> startBackup({int limit = 0}) async* {
+  ///
+  /// [onlyIds] 只备份指定的资产（相册里勾选的几张）。给值时：
+  ///   · **忽略 [limit]**，范围完全由勾选决定
+  ///   · **不过滤「已备份」**，勾了就传一遍 —— 内容没变时接收端判 skipped，
+  ///     内容变了（照片重新编辑过）时接收端回 409 并另存冲突副本。
+  ///     两种都是确定结论，比"悄悄跳过"更诚实。
+  Stream<BackupProgress> startBackup({
+    int limit = 0,
+    List<String>? onlyIds,
+  }) async* {
     if (_isRunning) {
       yield BackupProgress(
         completed: 0,
@@ -177,20 +186,45 @@ class BackupManager {
             // 清单拿不到时（连不上 /旧版接收端没有该接口）自动退化为只看本地记录。
 
             // 先划定关注窗口：最新 N 个（assets 已按拍摄时间从新到旧排序）
-            final window = (limit > 0 && assets.length > limit)
+            final onlySelected = onlyIds != null && onlyIds.isNotEmpty;
+            var window = (limit > 0 && assets.length > limit)
                 ? assets.take(limit).toList(growable: false)
                 : assets;
+
+            // 指定照片备份：范围完全由勾选决定，不与 limit 叠加
+            if (onlySelected) {
+              final wanted = onlyIds.toSet();
+              window = assets
+                  .where((a) => wanted.contains(a['localIdentifier'] as String))
+                  .toList(growable: false);
+              if (window.isEmpty) {
+                yield BackupProgress(
+                  completed: 0,
+                  total: 0,
+                  percentage: 0,
+                  error: '选中的照片在相册里找不到了（可能已被删除）',
+                  fatal: true,
+                );
+                return;
+              }
+            }
             final outsideCount = assets.length - window.length;
 
             final backedRecords = await _recordStore.loadAllRecords();
             final backedIds = backedRecords.map((r) => r.localIdentifier).toSet();
-            var unbacked =
-                window.where((a) => !backedIds.contains(a['localIdentifier'] as String))
+            // 勾选的照片不做「已备份」过滤：用户既然指定了，就如实传一遍。
+            // 内容相同 → 接收端 skipped（不重复占空间）；内容变了 → 409 冲突。
+            var unbacked = onlySelected
+                ? window.toList()
+                : window
+                    .where((a) =>
+                        !backedIds.contains(a['localIdentifier'] as String))
                     .toList();
 
             // 只有确实还有东西要传时才拉清单，避免每次点备份都白拉一次
+            // 指定照片时不拉：勾选就是要传，清单只用于"跳过已备份"的判断
             ManifestIndex? manifest;
-            if (unbacked.isNotEmpty) {
+            if (unbacked.isNotEmpty && !onlySelected) {
               manifest = await ManifestIndex.fetch(client);
             }
             if (manifest != null && !manifest.isEmpty) {
@@ -245,16 +279,21 @@ class BackupManager {
               completed: 0,
               total: total,
               percentage: 0,
-              currentFile: limit > 0
-                  ? '最新 $limit 个里还有 $total 个未备份，开始传输...'
-                  : '待备份 $total 个，开始传输...',
-              logMessage: limit > 0
-                  ? '关注窗口：最新 $limit 个资产（相册共 ${assets.length} 个）｜'
-                      '窗口内已备份 $windowBacked 个｜本次待传 $total 个'
-                      '${outsideCount > 0 ? '｜窗口外还有 $outsideCount 个，调大上限或留空可继续备份' : ''}'
-                      '${manifest != null && !manifest.isEmpty ? '｜电脑清单已核对 ${manifest.assetCount} 个资产' : '｜电脑清单不可用，仅凭本地记录判断'}'
-                  : '相册共 ${assets.length} 个资产｜已备份 $windowBacked 个｜本次待传 $total 个'
-                      '${manifest != null && !manifest.isEmpty ? '｜电脑清单已核对 ${manifest.assetCount} 个资产' : '｜电脑清单不可用，仅凭本地记录判断'}',
+              currentFile: onlySelected
+                  ? '已选 ${window.length} 张，开始传输...'
+                  : limit > 0
+                      ? '最新 $limit 个里还有 $total 个未备份，开始传输...'
+                      : '待备份 $total 个，开始传输...',
+              logMessage: onlySelected
+                  ? '指定照片：已选 ${window.length} 张（相册共 ${assets.length} 个）｜'
+                      '本次待传 $total 个｜不跳过已备份，内容一致时由接收端判定'
+                  : limit > 0
+                      ? '关注窗口：最新 $limit 个资产（相册共 ${assets.length} 个）｜'
+                          '窗口内已备份 $windowBacked 个｜本次待传 $total 个'
+                          '${outsideCount > 0 ? '｜窗口外还有 $outsideCount 个，调大上限或留空可继续备份' : ''}'
+                          '${manifest != null && !manifest.isEmpty ? '｜电脑清单已核对 ${manifest.assetCount} 个资产' : '｜电脑清单不可用，仅凭本地记录判断'}'
+                      : '相册共 ${assets.length} 个资产｜已备份 $windowBacked 个｜本次待传 $total 个'
+                          '${manifest != null && !manifest.isEmpty ? '｜电脑清单已核对 ${manifest.assetCount} 个资产' : '｜电脑清单不可用，仅凭本地记录判断'}',
             );
 
       // 5. 逐个导出并上传

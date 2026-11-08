@@ -17,6 +17,7 @@ import '../services/server_config.dart';
 import 'compare_page.dart';
 import 'live_debug_page.dart';
 import 'logs_page.dart';
+import 'pick_assets_page.dart';
 import 'verify_page.dart';
 
 /// 主界面
@@ -353,7 +354,19 @@ class _MainPageState extends State<MainPage> {
         : '服务器连接异常：$error');
   }
 
-  Future<void> _startBackup() async {
+  /// 打开相册勾选页，只备份选中的那几张
+  Future<void> _pickAndBackup() async {
+    if (_isOperating) return;
+    final picked = await Navigator.push<List<String>>(
+      context,
+      MaterialPageRoute(builder: (_) => const PickAssetsPage()),
+    );
+    if (picked == null || picked.isEmpty) return;
+    if (!mounted) return;
+    await _startBackup(onlyIds: picked);
+  }
+
+  Future<void> _startBackup({List<String>? onlyIds}) async {
     if (_isOperating) return;
 
     // 传输期间保持屏幕常亮，防止息屏导致中断
@@ -365,14 +378,17 @@ class _MainPageState extends State<MainPage> {
       _completed = 0;
       _total = 0;
       _uploadedBytes = 0;
-      _statusText = '正在备份...';
+      _statusText = onlyIds == null ? '正在备份...' : '正在备份所选照片...';
     });
 
-    final limit = _parseLimit();
-    _addLog('开始增量备份 → ${_config.isConfigured ? _config.baseUrl : '未配置服务器'}'
-        '${limit > 0 ? '（只备份最新 $limit 个）' : '（不限制数量）'}');
+    // 勾选模式下范围完全由勾选决定，与「数量上限」不叠加
+    final limit = onlyIds == null ? _parseLimit() : 0;
+    _addLog('${onlyIds == null ? '开始增量备份' : '开始备份所选 ${onlyIds.length} 张'}'
+        ' → ${_config.isConfigured ? _config.baseUrl : '未配置服务器'}'
+        '${onlyIds != null ? '（不跳过已备份，内容一致时由接收端判定）' : limit > 0 ? '（只备份最新 $limit 个）' : '（不限制数量）'}');
 
-    _backupSubscription = _backupManager.startBackup(limit: limit).listen(
+    _backupSubscription =
+        _backupManager.startBackup(limit: limit, onlyIds: onlyIds).listen(
       (progress) {
         if (!mounted) return;
         setState(() {
@@ -827,6 +843,18 @@ class _MainPageState extends State<MainPage> {
                 ),
               ],
             ),
+            const SizedBox(height: 10),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: _isOperating ? null : _pickAndBackup,
+                icon: const Icon(Icons.checklist_rounded, size: 18),
+                label: const Text('选择照片备份（只传勾选的）'),
+                style: OutlinedButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                ),
+              ),
+            ),
             if (_isOperating) ...[
               const SizedBox(height: 12),
               _buildButton(
@@ -838,8 +866,9 @@ class _MainPageState extends State<MainPage> {
             ],
             const SizedBox(height: 8),
             Text(
-              '备份会跳过已传过的；恢复只把「相册里已经没有了」的照片导回来，'
-              '照片还在手机上的不会重复导入。',
+              '备份会跳过已传过的（「选择照片备份」除外：勾了就传一遍，'
+              '内容没变时电脑端会判为跳过）；'
+              '恢复只把「相册里已经没有了」的照片导回来，照片还在手机上的不会重复导入。',
               style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
             ),
             const Divider(height: 24),
