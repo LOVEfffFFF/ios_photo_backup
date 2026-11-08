@@ -36,3 +36,6 @@ macos/Flutter/ephemeral/
 *.swp
 .DS_Store
 .codesign_cache
+
+# 调试桥运行时数据：里面是配对码与连接令牌，绝不能进版本库
+debug-bridge/data/

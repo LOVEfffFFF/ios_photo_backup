@@ -181,13 +181,6 @@ class DebugPhotoExecutor implements DebugExecutor {
     if (detail == null) throw StateError('照片不存在或无法读取');
     final full = await PhotoLibraryHelper.getAssetFullInfo(id);
 
-    final roles = <String>{
-      'main',
-      if (record?.livePhotoVideoRelativePath != null) 'pairedVideo',
-      ...?record?.extraResources.map((r) => r.role),
-      if (record == null) ...['adjustment', 'render'],
-    };
-
     return {
       'assetId': id,
       'createdUnix': detail.creationDate,
@@ -210,12 +203,15 @@ class DebugPhotoExecutor implements DebugExecutor {
             'error': r.error,
           },
       ],
+      // 原生通道只提供「主资源 / 配对视频」两种哈希，附加资源（配方、AAE、
+      // 渲染图）的哈希在 resources 行里逐条给出，不在这里重复读一遍。
       'hashes': {
-        for (final role in roles)
-          role: _hash(await PhotoLibraryHelper.hashAssetResources(
+        'main': _hash(
+            await PhotoLibraryHelper.hashAssetResources(localIdentifier: id)),
+        if (record?.livePhotoVideoRelativePath != null)
+          'pairedVideo': _hash(await PhotoLibraryHelper.hashAssetResources(
             localIdentifier: id,
-            preferVideo: role == 'pairedVideo',
-            resourceRole: ['main', 'pairedVideo'].contains(role) ? null : role,
+            preferVideo: true,
           )),
       },
       'editing': await readEditing(id),
