@@ -70,10 +70,17 @@ class PhotoFilterInfo {
       PhotoFilterInfo._('unknown', '滤镜未知：$reason');
 
   /// 已知的 effectName → 中文名（iOS 17.7.2 样本实测）
+  ///
+  /// 只收录**真机样本里见过**的名字。Apple 的命名规律（3D + 英文）
+  /// 看着很好推，但把「反差暖色」推成「暖色」比显示 3DNoir 本身更糟 ——
+  /// 用户会以为自己挂的是另一个滤镜。没收录的原样显示 identifier。
   static const Map<String, String> _names = {
     '3DVivid': '鲜明',
     '3DDramatic': '反差色',
     '3DVividWarm': '鲜暖色',
+    // 2026-11-08：ProRAW 样本 90183819 的当前配方（强度 50%）与相机 AAE
+    // （强度 100%）解出来都是 3DNoir，两处独立命中，确认它是「黑白」。
+    '3DNoir': '黑白',
   };
 
   /// 从 plist 文本（`Adjustments.plist` / `.aae`）解析
