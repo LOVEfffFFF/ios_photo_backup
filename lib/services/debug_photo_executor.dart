@@ -251,9 +251,14 @@ class DebugPhotoExecutor implements DebugExecutor {
       } else {
         try {
           final bytes = base64Decode(r.base64);
-          final info = isCamera
-              ? PhotoFilterInfo.fromPlistText(
-                  utf8.decode(bytes, allowMalformed: true))
+          // ⚠ 两种附件**都是 XML plist**（type 7 = Adjustments.plist，
+          // type 16 = .aae），配方在里面的 `<data>` 段才是 base64 的裸 DEFLATE。
+          // 所以必须先当文本读、走 fromPlistText；直接把整个 plist 喂给
+          // fromEnvelopeBytes 会得到「配方解压失败（不是裸 DEFLATE）」
+          // —— 2026-11-08 第一次真机 inspect 就是这么错的。
+          final text = utf8.decode(bytes, allowMalformed: true);
+          final info = text.contains('adjustmentData')
+              ? PhotoFilterInfo.fromPlistText(text)
               : PhotoFilterInfo.fromEnvelopeBytes(bytes);
           recipe = {
             'status': info.status,
