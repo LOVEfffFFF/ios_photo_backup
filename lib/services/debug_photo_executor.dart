@@ -190,6 +190,19 @@ class DebugPhotoExecutor implements DebugExecutor {
       'mediaType': detail.mediaType,
       'filename': detail.originalFilename,
       'subtypes': detail.subtypes,
+      // ---- 以下字段一直都读到了，只是以前没往通道里返回 ----
+      // 「逐项对比」要能对得上，缺一项就会变成「看起来一致，其实没比」。
+      'duration': detail.duration,
+      'isFavorite': detail.isFavorite,
+      'isHidden': detail.isHidden,
+      'hasLocation': detail.hasLocation,
+      'latitude': full?.latitude ?? 0,
+      'longitude': full?.longitude ?? 0,
+      'formatDescriptions': full?.formatDescriptions ?? const <String>[],
+      'resourceCount': detail.resourceCount,
+      // iOS 自己那份编辑输入（PHContentEditingInput）。
+      // 判「相册是否认为这张被编辑过」靠它，与资源里的 plist 是两条独立证据。
+      'iosEditing': full?.editing ?? const <String, dynamic>{},
       'resources': [
         for (final r in (full?.resources ?? const <AssetResourceDetail>[]))
           {
