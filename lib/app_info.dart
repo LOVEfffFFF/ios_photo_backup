@@ -8,7 +8,10 @@ class AppInfo {
   const AppInfo._();
 
   /// 语义化版本号（与 pubspec.yaml 的 version 保持一致）
-  static const String version = '1.2.0';
+  ///
+  /// 1.3.0：App 与接收端加入双向身份标识（`X-Client-Impl` / `/ping` 的 impl+proto），
+  /// 与旧版不互通 —— 必须 App 与 server 脚本同时更新。
+  static const String version = '1.3.0';
 
   /// 构建标识：编译时间（同一个版本多次编译时用它区分）
   ///

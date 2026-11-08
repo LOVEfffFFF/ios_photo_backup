@@ -22,6 +22,31 @@ class UploadResult {
   });
 }
 
+/// 本 App 的协议身份标识
+///
+/// **必须与 `windows-receiver/PhotoBackupReceiver.ps1` 里的 `$script:ImplId` 完全一致。**
+///
+/// ## 为什么需要它
+///
+/// 同一个局域网里可能同时跑着好几个「相册备份」实现（不同分支、不同 AI 写的版本，
+/// 典型例子是 `ios_photo_backup` 与 `ios_photo_backup_openai`）。它们的分层、
+/// 端点名甚至 `/ping` 的返回都一样，区别只在行为细节。
+///
+/// 没有标识时会出现两种"静默错配"：
+///
+///   · App 连上**别人的接收端**，上传成功、状态 200，但文件落在别人的目录里；
+///   · 本项目的接收端收下**别人的 App** 传来的文件，manifest 混进陌生条目。
+///
+/// 两种情况都不会报错，直到核对数据时才发现对不上。所以标识必须是
+/// **双向、强制**的：App 校验服务端返回的 `impl`，服务端校验请求头里的 `X-Client-Impl`。
+const String clientImplId = 'photobackup-main';
+
+/// 协议版本号
+///
+/// 服务端 `/ping` 会返回 `proto`。不一致说明两端行为可能有出入
+/// （例如资源槽位映射变了），直接拒绝比半路出错更容易排查。
+const int protocolVersion = 2;
+
 /// 接收端（电脑）客户端：上传、下载、连通性探测
 ///
 /// 协议见 windows-receiver/PhotoBackupReceiver.ps1：
@@ -52,25 +77,37 @@ class ServerClient {
     this.downloadTimeout = const Duration(minutes: 15),
   });
 
+  /// 每个请求都带上身份标识与令牌
+  ///
+  /// 服务端会对 /upload 等业务端点核对 [clientImplId]，不带标识的请求会被 403。
+  void _applyIdentity(HttpClientRequest request) {
+    request.headers.set('X-Client-Impl', clientImplId);
+    if (config.token.isNotEmpty) {
+      request.headers.set('X-Auth-Token', config.token);
+    }
+  }
+
   /// 连通性探测：返回 null 表示正常，否则返回错误描述
+  ///
+  /// 注意这里**不只看 HTTP 200**：任何 HTTP 服务（包括别的 AI 写的接收端）
+  /// 都能返回 200。必须核对响应里的 `impl` / `proto` 才能确定
+  /// 「这台服务器是不是本项目的那一套」。
   Future<String?> testConnection() async {
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 8);
     try {
       final request = await client.getUrl(Uri.parse('${config.baseUrl}/ping'));
-      if (config.token.isNotEmpty) {
-        request.headers.set('X-Auth-Token', config.token);
-      }
+      _applyIdentity(request);
       final response =
           await request.close().timeout(const Duration(seconds: 8));
-      await response.drain();
-      if (response.statusCode == 200) {
-        return null;
-      }
+      final body = await response.transform(utf8.decoder).join();
       if (response.statusCode == 401) {
         return '密钥不正确（HTTP 401），请与接收端 -Token 保持一致';
       }
-      return '服务器返回 HTTP ${response.statusCode}';
+      if (response.statusCode != 200) {
+        return '服务器返回 HTTP ${response.statusCode}';
+      }
+      return checkServerIdentity(body);
     } on TimeoutException {
       return '连接超时：请确认电脑端服务已启动、手机与电脑在同一局域网';
     } catch (e) {
@@ -78,6 +115,39 @@ class ServerClient {
     } finally {
       client.close(force: true);
     }
+  }
+
+  /// 校验 `/ping` 的响应确实来自「本项目的接收端」
+  ///
+  /// 返回 null 表示通过，否则返回给人看的失败原因。抽成静态方法是为了
+  /// 让扫码配对、设置页、自动化测试都用同一套判定。
+  static String? checkServerIdentity(String body) {
+    Object? decoded;
+    try {
+      decoded = jsonDecode(body);
+    } catch (_) {
+      decoded = null;
+    }
+    if (decoded is! Map) {
+      return '这台服务器没有返回项目标识，不是本 App 配套的接收端'
+          r'（请更新 windows-receiver\PhotoBackupReceiver.ps1）';
+    }
+
+    final impl = '${decoded['impl'] ?? ''}';
+    if (impl.isEmpty) {
+      return '接收端版本过旧：/ping 里没有 impl 标识，无法确认是不是本项目的一套'
+          r'（请更新 windows-receiver\PhotoBackupReceiver.ps1 后重启服务）';
+    }
+    if (impl != clientImplId) {
+      return '连到了另一个版本的服务（impl=$impl），本 App 只接受 $clientImplId';
+    }
+
+    final proto = (decoded['proto'] as num?)?.toInt() ?? 0;
+    if (proto != protocolVersion) {
+      return '协议版本不一致（服务器 $proto / 本 App $protocolVersion），'
+          '请让 App 与接收端脚本使用同一份代码';
+    }
+    return null;
   }
 
   /// 将本地文件上传到接收端
@@ -109,9 +179,7 @@ class ServerClient {
           await client.postUrl(Uri.parse('${config.baseUrl}/upload'));
       request.headers
           .set('X-File-Path', Uri.encodeComponent(relativePath));
-      if (config.token.isNotEmpty) {
-        request.headers.set('X-Auth-Token', config.token);
-      }
+      _applyIdentity(request);
       _setHeaderIfPresent(request, 'X-Asset-Id', assetId);
       _setHeaderIfPresent(request, 'X-Media-Type', mediaType);
       _setHeaderIfPresent(request, 'X-Role', role);
@@ -202,9 +270,7 @@ class ServerClient {
       final uri = Uri.parse('${config.baseUrl}/download')
           .replace(queryParameters: {'path': relativePath});
       final request = await client.getUrl(uri);
-      if (config.token.isNotEmpty) {
-        request.headers.set('X-Auth-Token', config.token);
-      }
+      _applyIdentity(request);
 
       final response = await request.close().timeout(downloadTimeout);
       if (response.statusCode != 200) {
@@ -250,9 +316,7 @@ class ServerClient {
     try {
       final request =
           await client.postUrl(Uri.parse('${config.baseUrl}/diagnostics'));
-      if (config.token.isNotEmpty) {
-        request.headers.set('X-Auth-Token', config.token);
-      }
+      _applyIdentity(request);
       final bytes = utf8.encode(content);
       // 直接写Content-Type 头：ContentType.text 需要两个位置参数
       // （primaryType, subType），少写一个会编译失败
@@ -301,9 +365,7 @@ class ServerClient {
     try {
       final request =
           await client.postUrl(Uri.parse('${config.baseUrl}/log'));
-      if (config.token.isNotEmpty) {
-        request.headers.set('X-Auth-Token', config.token);
-      }
+      _applyIdentity(request);
       request.headers.set('X-Log-Name', name);
       request.headers.set('Content-Type', 'text/plain; charset=utf-8');
       final bytes = utf8.encode(content);
@@ -348,9 +410,7 @@ class ServerClient {
         uri = uri.replace(queryParameters: {'since': since});
       }
       final request = await client.getUrl(uri);
-      if (config.token.isNotEmpty) {
-        request.headers.set('X-Auth-Token', config.token);
-      }
+      _applyIdentity(request);
 
       final response = await request.close().timeout(downloadTimeout);
       if (response.statusCode != 200) {

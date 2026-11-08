@@ -105,6 +105,14 @@ foreach ($path in @('../escape.bin', 'C:/escape.bin', '2026/10/test.bin:stream',
     Assert-True ($r.Code -eq 400) "unsafe or reserved path rejected: $path"
 }
 
+# Receiver identity: only the matching client implementation is served. Other
+# implementations (other branches / other authors) speak the same endpoints, so
+# without this check their uploads land silently in our directory.
+$script:ImplId = 'photobackup-main'
+Assert-True (Test-ClientIdentity -Headers @{'X-Client-Impl'='photobackup-main'}) 'project client implementation is accepted'
+Assert-True (-not (Test-ClientIdentity -Headers @{})) 'client without implementation header is rejected'
+Assert-True (-not (Test-ClientIdentity -Headers @{'X-Client-Impl'='photobackup-openai'})) 'foreign client implementation is rejected'
+
 # Reproduce a ProRAW sidecar in a deep save directory. Its final path fits
 # Windows PowerShell's legacy limit; appending a GUID to the full name does not.
 $longDirectoryName = 'p' * [Math]::Max(1, (158 - $script:SavePath.Length - 1))

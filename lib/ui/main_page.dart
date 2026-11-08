@@ -279,6 +279,10 @@ class _MainPageState extends State<MainPage> {
       });
       _addLog('扫码成功：${info.address}'
           '${info.token.isEmpty ? '（无访问密钥）' : '（密钥 ${info.token.length} 位）'}');
+      // 扫完立刻验一次：二维码格式是公开的，别的实现（别的分支 / 别的 AI 版本）
+      // 也能生成一张长得一样的码。只有真正请求一次 /ping 并核对 impl，
+      // 才能确定「这台到底是不是本项目的那一套接收端」。
+      if (mounted) await _saveAndTest();
     } on QrScanException catch (e) {
       if (!mounted) return;
       _addLog('扫码失败：${e.message}');
