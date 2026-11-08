@@ -15,6 +15,7 @@ import '../services/qr_scanner.dart';
 import '../services/server_client.dart';
 import '../services/server_config.dart';
 import 'compare_page.dart';
+import 'live_debug_page.dart';
 import 'logs_page.dart';
 import 'verify_page.dart';
 
@@ -995,15 +996,39 @@ class _MainPageState extends State<MainPage> {
                   '操作日志',
                   style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
                 ),
-                if (_logs.isNotEmpty)
-                  TextButton(
-                    onPressed: () {
-                      setState(() {
-                        _logs.clear();
-                      });
-                    },
-                    child: const Text('清空', style: TextStyle(fontSize: 13)),
-                  ),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // 实时调试：让电脑端在**不改包**的前提下回读这台手机的
+                    // 资源与编辑附件、并跑一次受控往返。只在空闲时开放，
+                    // 避免与备份/恢复抢相册。
+                    TextButton.icon(
+                      onPressed: _isOperating
+                          ? null
+                          : () => Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                    builder: (_) => const LiveDebugPage()),
+                              ),
+                      icon: const Icon(Icons.bug_report_outlined, size: 15),
+                      label: const Text('实时调试',
+                          style: TextStyle(fontSize: 12)),
+                      style: TextButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    ),
+                    if (_logs.isNotEmpty)
+                      TextButton(
+                        onPressed: () {
+                          setState(() {
+                            _logs.clear();
+                          });
+                        },
+                        child:
+                            const Text('清空', style: TextStyle(fontSize: 13)),
+                      ),
+                  ],
+                ),
               ],
             ),
             // ---- 版本标识 + 诊断日志导出 ----
