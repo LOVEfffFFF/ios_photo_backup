@@ -645,17 +645,21 @@ class PhotoLibraryHelper {
   /// 将照片写入系统相册
   /// [filePath] 照片文件路径
   /// [creationDate] 原始拍摄时间
+  /// [mainFilename] iOS 里的原始文件名（如 `IMG_7677.DNG`）；空串表示没有
   ///
   /// 返回新资产的 localIdentifier（用于追踪「导入的这张还在不在相册」），失败返回 null
   static Future<String?> savePhotoToLibrary({
     required String filePath,
     required double creationTimestamp,
+    String mainFilename = '',
   }) async {
     try {
       final result = await _channel.invokeMethod('savePhotoToLibrary', {
         'filePath': filePath,
         // 原生侧按毫秒解析；这里传 Double 以保留亚秒精度，避免同秒照片顺序错乱
         'creationDate': creationTimestamp * 1000,
+        // 原名回写：相册里显示 IMG_7677.DNG 而不是时间戳暂存名
+        if (mainFilename.isNotEmpty) 'mainFilename': mainFilename,
       });
       if (result is String) {
         return result;
@@ -672,11 +676,13 @@ class PhotoLibraryHelper {
   static Future<String?> saveVideoToLibrary({
     required String filePath,
     required double creationTimestamp,
+    String mainFilename = '',
   }) async {
     try {
       final result = await _channel.invokeMethod('saveVideoToLibrary', {
         'filePath': filePath,
         'creationDate': creationTimestamp * 1000,
+        if (mainFilename.isNotEmpty) 'mainFilename': mainFilename,
       });
       if (result is String) {
         return result;
@@ -694,12 +700,17 @@ class PhotoLibraryHelper {
     required String photoPath,
     required String videoPath,
     required double creationTimestamp,
+    String photoFilename = '',
+    String videoFilename = '',
   }) async {
     try {
       final result = await _channel.invokeMethod('saveLivePhotoToLibrary', {
         'photoPath': photoPath,
         'videoPath': videoPath,
         'creationDate': creationTimestamp * 1000,
+        // 实况照片的两个资源各有各的原名（IMG_7677.HEIC / IMG_7677.MOV）
+        if (photoFilename.isNotEmpty) 'photoFilename': photoFilename,
+        if (videoFilename.isNotEmpty) 'videoFilename': videoFilename,
       });
       if (result is String) {
         return result;
@@ -765,12 +776,15 @@ class PhotoLibraryHelper {
     required String filePath,
     required double creationTimestamp,
     List<Map<String, String>> extras = const [],
+    String mainFilename = '',
   }) async {
     try {
       final raw = await _channel.invokeMethod('savePhotoWithExtras', {
         'filePath': filePath,
         'creationDate': creationTimestamp * 1000,
         if (extras.isNotEmpty) 'extraResources': extras,
+        // 主文件原名（清单里的 main 条目）—— 相册里显示原名而不是暂存名
+        if (mainFilename.isNotEmpty) 'mainFilename': mainFilename,
       });
       if (raw is String) {
         // 旧版原生只返回路径字符串

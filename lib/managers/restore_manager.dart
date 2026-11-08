@@ -416,17 +416,29 @@ class RestoreManager {
       }
 
       // 写入系统相册，拿到新资产的 localIdentifier
+          // 原名：清单里 main 条目记着 iOS 里的文件名（IMG_7677.DNG）。
+          // 拿不到就留空 —— 原生侧退回暂存名，旧备份照常恢复。
+          final originalMainName =
+              manifest?.originalFilenameOf(record.relativePath) ?? '';
+          final originalVideoName = record.livePhotoVideoRelativePath == null
+              ? ''
+              : (manifest?.originalFilenameOf(
+                      record.livePhotoVideoRelativePath!) ??
+                  '');
           String? newAssetId;
           if (record.mediaType == 'video') {
             newAssetId = await PhotoLibraryHelper.saveVideoToLibrary(
               filePath: mainPath,
               creationTimestamp: effectiveTimestamp,
+              mainFilename: originalMainName,
             );
           } else if (videoPath != null) {
             newAssetId = await PhotoLibraryHelper.saveLivePhotoToLibrary(
               photoPath: mainPath,
               videoPath: videoPath,
               creationTimestamp: effectiveTimestamp,
+              photoFilename: originalMainName,
+              videoFilename: originalVideoName,
             );
           } else if (record.extraResources.isNotEmpty) {
             // 有附加资源（ProRAW 的 DNG / Adjustments.plist / .aae）时，
@@ -437,6 +449,7 @@ class RestoreManager {
             newAssetId = await PhotoLibraryHelper.savePhotoToLibrary(
               filePath: mainPath,
               creationTimestamp: effectiveTimestamp,
+              mainFilename: originalMainName,
             );
           }
 
@@ -470,6 +483,9 @@ Future<String?> _saveWithExtras(
 ) async {
   final tempDir = await FileHelper.getUploadTempDirectory();
     final base = p.basename(mainPath);
+    // 主文件原名：清单 main 条目里的 iOS 文件名。写回相册后
+    // 用户看到的是 IMG_7677.DNG，而不是 20261108_222035_xxx.dng。
+    final originalName = manifest?.originalFilenameOf(record.relativePath) ?? '';
     final downloaded = <Map<String, String>>[];
     final cleanup = <String>[];
 
@@ -528,6 +544,7 @@ Future<String?> _saveWithExtras(
       return PhotoLibraryHelper.savePhotoToLibrary(
         filePath: mainPath,
         creationTimestamp: timestamp,
+        mainFilename: originalName,
       );
     }
 
@@ -536,6 +553,7 @@ Future<String?> _saveWithExtras(
         filePath: mainPath,
         creationTimestamp: timestamp,
         extras: downloaded,
+        mainFilename: originalName,
       );
       if (!r.ok) {
         LogService.instance.write(

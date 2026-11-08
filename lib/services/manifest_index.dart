@@ -259,6 +259,25 @@ class ManifestIndex {
     return (v == null || v.isEmpty) ? null : v;
   }
 
+  /// 查某个服务器路径在 iOS 里的原始文件名（如 `IMG_7677.DNG`）
+  ///
+  /// 恢复时靠它把原名写回相册：不写的话相册里显示的是
+  /// `20261108_222035_1024ED87E919.dng` 这种「时间 + 资产 ID」，
+  /// 用户根本认不出这是自己哪张照片。
+  ///
+  /// 返回 null = 旧备份没有这个字段（或记录是从文件名反推的），
+  /// 调用方应退回暂存文件名 —— 恢复照常，只是名字不好看。
+  String? originalFilenameOf(String serverPath) {
+    final v = _byPath[serverPath]?.originalFilename ?? '';
+    return v.isEmpty ? null : v;
+  }
+
+  /// 查某个服务器路径的 UTI（诊断用）
+  String? utiOf(String serverPath) {
+    final v = _byPath[serverPath]?.uti ?? '';
+    return v.isEmpty ? null : v;
+  }
+
   ManifestIndex(this.entries) {
     _buildIndex();
   }

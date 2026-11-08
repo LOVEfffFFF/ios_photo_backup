@@ -935,6 +935,27 @@ private func photoBackupSignalHandler(_ sig: Int32) {
 /// 因此改成逐级降级：能带多少带多少，绝不让「风格」拖累「原图」。
 ///
 /// 返回：{ id, written, failed, warning, error }
+    /// 写入资源时的创建选项：只把原始文件名交回去
+    ///
+    /// ## 为什么只设文件名、不设 UTI
+    ///
+    /// 主资源的类型由**文件内容**决定（DNG 头本身就是 RAW）。人为指定
+    /// `uniformTypeIdentifier` 反而可能让 iOS 把它当成别的东西 ——
+    /// 恢复出来的 ProRAW 丢了 RAW 标记就属于这种自伤。
+    /// 附加资源（plist / .aae）那边必须设 UTI，因为它们的类型只能靠声明。
+    ///
+    /// 返回 nil 表示「没有原名可用」，此时 `addResource` 收到 nil 选项，
+    /// 行为与旧版完全一致（相册回退到显示暂存文件名）。
+    private static func creationOptions(
+        originalFilename: String?
+    ) -> PHAssetResourceCreationOptions? {
+        guard let name = originalFilename, !name.isEmpty else { return nil }
+        let options = PHAssetResourceCreationOptions()
+        // 只取最后一段：清单里的名字万一带了路径，整串塞进 originalFilename 会被相册拒收
+        options.originalFilename = URL(fileURLWithPath: name).lastPathComponent
+        return options
+    }
+
 private func savePhotoWithExtras(call: FlutterMethodCall, result: @escaping FlutterResult) {
     guard let args = call.arguments as? [String: Any],
           let filePath = args["filePath"] as? String,
@@ -947,6 +968,10 @@ private func savePhotoWithExtras(call: FlutterMethodCall, result: @escaping Flut
         result(["id": NSNull(), "error": "主文件不存在"])
         return
     }
+    // 主文件原名：清单里记着 iOS 里的原始文件名（IMG_7677.DNG），
+    // 写回相册才能让恢复结果看起来是「自己的照片」而不是一串时间戳。
+    // 旧备份没有该字段时传空 → options 为 nil，行为与以前完全一致。
+    let mainOptions = Self.creationOptions(originalFilename: args["mainFilename"] as? String)
 
     // 槽位编号实测：Apple 文档**不给 rawValue**，只能跑出来看。
     // 这条日志一次性钉死全部编号，以后写槽位逻辑不必再靠猜。
@@ -1077,7 +1102,7 @@ private func savePhotoWithExtras(call: FlutterMethodCall, result: @escaping Flut
             let request = PHAssetCreationRequest.forAsset()
             // 主文件用 .photo 写入 —— 这是最稳的路径
             do {
-                try request.addResource(with: .photo, fileURL: fileURL, options: nil)
+                try request.addResource(with: .photo, fileURL: fileURL, options: mainOptions)
                 AppDelegate.appendLogLine("[info]   ✓ 主文件写入成功")
             } catch {
                 failure = "主文件写入被拒: \(error.localizedDescription)"
@@ -2422,11 +2447,15 @@ private func hashAssetResources(call: FlutterMethodCall, result: @escaping Flutt
         }
 
         let creationDate = Date(timeIntervalSince1970: creationDateTimeInterval / 1000.0)
+        // 原名回写：不传的话相册里显示的是本地暂存名（20261108_222035_xxx.dng），
+        // 恢复出来的照片看起来像外人的文件
+        let mainOptions = Self.creationOptions(
+            originalFilename: args["mainFilename"] as? String)
         var newLocalIdentifier: String?
 
         PHPhotoLibrary.shared().performChanges {
             let request = PHAssetCreationRequest.forAsset()
-            try? request.addResource(with: .photo, fileURL: fileURL, options: nil)
+            try? request.addResource(with: .photo, fileURL: fileURL, options: mainOptions)
             request.creationDate = creationDate
             newLocalIdentifier = request.placeholderForCreatedAsset?.localIdentifier
         } completionHandler: { success, error in
@@ -2460,11 +2489,13 @@ private func hashAssetResources(call: FlutterMethodCall, result: @escaping Flutt
         }
 
         let creationDate = Date(timeIntervalSince1970: creationDateTimeInterval / 1000.0)
+        let mainOptions = Self.creationOptions(
+            originalFilename: args["mainFilename"] as? String)
         var newLocalIdentifier: String?
 
         PHPhotoLibrary.shared().performChanges {
             let request = PHAssetCreationRequest.forAsset()
-            try? request.addResource(with: .video, fileURL: fileURL, options: nil)
+            try? request.addResource(with: .video, fileURL: fileURL, options: mainOptions)
             request.creationDate = creationDate
             newLocalIdentifier = request.placeholderForCreatedAsset?.localIdentifier
         } completionHandler: { success, error in
@@ -2502,12 +2533,17 @@ private func hashAssetResources(call: FlutterMethodCall, result: @escaping Flutt
         }
 
         let creationDate = Date(timeIntervalSince1970: creationDateTimeInterval / 1000.0)
+        // Live Photo 的两个资源各有各的原名（IMG_7677.HEIC / IMG_7677.MOV）
+        let photoOptions = Self.creationOptions(
+            originalFilename: args["photoFilename"] as? String)
+        let videoOptions = Self.creationOptions(
+            originalFilename: args["videoFilename"] as? String)
         var newLocalIdentifier: String?
 
         PHPhotoLibrary.shared().performChanges {
             let request = PHAssetCreationRequest.forAsset()
-            try? request.addResource(with: .photo, fileURL: photoURL, options: nil)
-            try? request.addResource(with: .pairedVideo, fileURL: videoURL, options: nil)
+            try? request.addResource(with: .photo, fileURL: photoURL, options: photoOptions)
+            try? request.addResource(with: .pairedVideo, fileURL: videoURL, options: videoOptions)
             request.creationDate = creationDate
             newLocalIdentifier = request.placeholderForCreatedAsset?.localIdentifier
         } completionHandler: { success, error in

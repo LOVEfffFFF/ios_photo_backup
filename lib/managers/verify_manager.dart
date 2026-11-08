@@ -260,6 +260,15 @@ class VerifyManager {
           )
         : null;
 
+    // 原名：往返验证必须与正式恢复走**同一条**回写路径，
+    // 否则验证通过的是「名字变了的那条路」，等于没验证文件名。
+    final originalName = manifest?.originalFilenameOf(record.relativePath) ?? '';
+    final originalVideoName =
+        (isLive && record.livePhotoVideoRelativePath != null)
+            ? (manifest?.originalFilenameOf(record.livePhotoVideoRelativePath!) ??
+                '')
+            : '';
+
     // 清单里备份当时记下的原图侧哈希（第三方基准）
     final expectMain = manifest?.clientSha256Of(record.relativePath);
     final expectVideo = (isLive && record.livePhotoVideoRelativePath != null)
@@ -303,6 +312,8 @@ class VerifyManager {
             photoPath: mainPath,
             videoPath: videoPath,
             creationTimestamp: record.creationTimestamp,
+            photoFilename: originalName,
+            videoFilename: originalVideoName,
           ) ?? '';
           _safeDelete(videoPath);
         } catch (_) {
@@ -351,6 +362,7 @@ class VerifyManager {
             filePath: mainPath,
             creationTimestamp: record.creationTimestamp,
             extras: extras,
+            mainFilename: originalName,
           );
           restoredId = r.assetId;
           _log('写入结果: ok=${r.ok} written=${r.written} failed=${r.failed}'
@@ -364,6 +376,7 @@ class VerifyManager {
             restoredId = await PhotoLibraryHelper.savePhotoToLibrary(
               filePath: mainPath,
               creationTimestamp: record.creationTimestamp,
+              mainFilename: originalName,
             ) ?? '';
             _log('降级写入结果: ${restoredId.isEmpty ? "仍失败" : "ok assetId=$restoredId"}');
           } else if (r.failed > 0) {
@@ -379,6 +392,7 @@ class VerifyManager {
           restoredId = await PhotoLibraryHelper.savePhotoToLibrary(
             filePath: mainPath,
             creationTimestamp: record.creationTimestamp,
+            mainFilename: originalName,
           ) ?? '';
           _log('写入结果: ${restoredId.isEmpty ? "失败" : "ok assetId=$restoredId"}');
         }
