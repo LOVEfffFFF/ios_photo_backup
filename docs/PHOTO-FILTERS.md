@@ -159,3 +159,79 @@ node control.cjs $c job <jobId>          # 取结果
    > **载荷头**。扫描结果里的 `payloadHeadHex` 就是干这个的。
 5. **扫不全的情况**：某滤镜从未在相册里用过 → 扫不出来；iCloud 原件未下载且网络不可用 → 可能触发 120 秒兜底（结果标记 `timedOut`，只含已读到的部分）。
 6. **`adjustmentTimestamp` 在公开 API 下不可控**。文件时间、资源 import date、request import date、request modification date、`unmanagedAdjustment.adjustmentTimestamp` 五类实验均失败。验收应比「解码后的配方内容」，不比字节。
+7. **缓存图不会跟着配方刷新**。详见第 5 节：相册显示的是 `FullSizeRender.jpg`，
+   编辑界面读的是 `Adjustments.plist`；两者不一致时会出现「显示鲜明、画面黑白」。
+
+---
+
+## 5. 配方写入验证：能不能自己「造滤镜」（2026-11-09 真机）
+
+### 结论：能
+
+iOS **不校验 `effectName`**。把母本的原配方解成 JSON，只替换
+`Effect.settings.effectName` / `effectIntensity`，其余字段原样保留，
+写进副本后读回 —— 9 个滤镜全部被原样接受（读回的 `effectName`、中文名、
+强度与写入值完全一致）：
+
+| 写入 | 读回 | 强度 |
+| --- | --- | --- |
+| `3DVivid` | 鲜明 | 0.5 |
+| `3DDramatic` | 反差色 | 0.5 |
+| `3DVividWarm` | 鲜暖色 | 0.5 |
+| `3DVividCool` | 鲜冷色 | 0.5 |
+| `3DDramaticCool` | 反差冷色 | 0.5 |
+| `3DDramaticWarm` | 反差暖色 | 0.5 |
+| `Mono` | 单色 | 0.5 |
+| `3DSilverplate` | 银色调 | 0.5 |
+| `3DNoir` | 黑白 | 0.5 |
+
+母本原本是「黑白」，改成上面任意一个都被接受 —— 说明 `Effect` 里那个字符串
+就是滤镜身份，系统没有隐藏的合法名单。
+
+### 硬约束一：配方必须与渲染图成对
+
+只写 `DNG + 配方`（不带 `FullSizeRender.jpg`）时，iOS **静默丢弃配方资源**：
+接口返回 `written=1`，副本里只剩 DNG，`adjustments` 完全不存在。
+所以 `fullSizePhoto` 不是可选缓存，缺了它配方写不进去。
+
+### 硬约束二：缓存图不会被配方自动刷新
+
+三件套写入后，同一个副本上出现三种表现：
+
+| 看的地方 | 依据 | 结果 |
+| --- | --- | --- |
+| 编辑界面的滤镜名/强度 | `Adjustments.plist` | 新滤镜 ✔ |
+| 相册大图 / 缩略图 | `FullSizeRender.jpg` | 母本原来的画面（如仍是黑白） |
+| 在编辑界面滑一下强度 | iOS 按配方重渲染 | 立刻变成新滤镜效果 ✔ |
+
+即：**iOS 有能力按配方渲染，只是不会主动重建缓存**。
+所以「恢复后相册里直接看着正确」的前提是「配方与缓存图来自同一次编辑」——
+备份里的这两样天然一致；「自己造滤镜」的场景必须先让 iOS 重渲染一次。
+
+### 复现方式
+
+手机端在「实时调试」连上电脑，母本是会话里勾选的资产：
+
+```powershell
+cd debug-bridge
+$c = ([IO.File]::ReadAllText('data/latest.json') | ConvertFrom-Json).connectionFile
+node control.cjs $c filterProbe asset-1 probe:3DVivid:0.5   # 单点
+node control.cjs $c filterProbe asset-1 probe:Mono:0.5      # 换滤镜
+node control.cjs $c job <jobId>                             # 取结果
+```
+
+构造流程（`probeFilter`）：原配方资源 → 抠出 `adjustmentData` →
+裸 DEFLATE 解压 → JSON → 只改 `Effect.settings` → 重新压回 →
+按系统产物结构写 `Adjustments.plist`（`adjustmentBaseVersion` /
+`adjustmentData` / `adjustmentEditorBundleID` / `adjustmentFormatIdentifier` /
+`adjustmentFormatVersion` / `adjustmentRenderTypes` / `adjustmentTimestamp`）→
+导出 DNG 当母本 → 与 iOS 渲染图一起 `savePhotoWithExtras` → 读回校验。
+
+### 边界与风险
+
+- 每次试验往相册写一个副本（母本 64 MB 时每个副本约 64 MB），
+  记录在 `debug_copies.json`，可在「实时调试」页一键清理；
+- `savePhotoWithExtras` 的 `allowUnpaired` 开关**只给实验用**，
+  正常恢复路径仍强制配方与渲染图成对；
+- 尚未验证：强度 0 / 100 边界、虚构名字（如 `3DFake`）是否也被接受、
+  视频（慢动作）配方能否用同一套构造。
