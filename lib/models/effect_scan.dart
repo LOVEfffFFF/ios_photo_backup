@@ -128,7 +128,10 @@ class EffectScanResult {
       b.writeln('解码失败 ${unknown.length} 个：');
       for (final s in unknown.take(20)) {
         b.writeln('  ${s.filename}: ${s.recipe.description}');
-        if (s.headHex.isNotEmpty) b.writeln('      head=${s.headHex}');
+        if (s.headHex.isNotEmpty) b.writeln('      file=${s.headHex}');
+        if (s.payloadHeadHex.isNotEmpty) {
+          b.writeln('      payload=${s.payloadHeadHex}');
+        }
       }
     }
     return b.toString();
@@ -151,6 +154,7 @@ class EffectScanSample {
     required this.truncated,
     required this.error,
     required this.headHex,
+    required this.payloadHeadHex,
     required this.recipe,
   });
 
@@ -172,6 +176,13 @@ class EffectScanSample {
   /// 「不是裸 DEFLATE」这一句永远查不下去。
   final String headHex;
 
+  /// plist 里 `<data>` 解码后（即配方载荷）的前 24 字节十六进制。
+  ///
+  /// 资源文件头永远是 `3c 3f 78 6d 6c`（`<?xml`），只有载荷头才能说明
+  /// 配方到底用的什么容器：`78 9c` = zlib 带头、`1f 8b` = gzip、
+  /// `7b 22` = 未压缩 JSON。
+  final String payloadHeadHex;
+
   /// 解码后的配方（见 [PhotoFilterInfo]）
   final PhotoFilterInfo recipe;
 
@@ -188,6 +199,10 @@ class EffectScanSample {
       }
     }
     final transportError = '${m['error'] ?? ''}';
+    final decoded = _decode(
+      bytes,
+      decodeError.isNotEmpty ? decodeError : transportError,
+    );
     return EffectScanSample(
       assetId: '${m['assetId'] ?? ''}',
       creationDate: (m['creationDate'] as num?)?.toDouble() ?? 0,
@@ -198,29 +213,61 @@ class EffectScanSample {
       truncated: m['truncated'] == true,
       error: transportError,
       headHex: '${m['headHex'] ?? ''}',
-      recipe: _decode(
-        bytes,
-        decodeError.isNotEmpty ? decodeError : transportError,
-      ),
+      payloadHeadHex: decoded.payloadHead,
+      recipe: decoded.info,
     );
   }
 
   /// 先按 XML plist 解（`<key>adjustmentData</key><data>…</data>`），
   /// 解不开再把这批字节本身当作裸配方 envelope 试一次。
-  static PhotoFilterInfo _decode(List<int> bytes, String transportError) {
+  static _Decoded _decode(List<int> bytes, String transportError) {
     if (transportError.isNotEmpty) {
-      return PhotoFilterInfo.unknown('读取失败：$transportError');
+      return _Decoded(PhotoFilterInfo.unknown('读取失败：$transportError'));
     }
-    if (bytes.isEmpty) return PhotoFilterInfo.unknown('资源为空');
+    if (bytes.isEmpty) return _Decoded(PhotoFilterInfo.unknown('资源为空'));
 
     final text = utf8.decode(bytes, allowMalformed: true);
     final fromPlist = PhotoFilterInfo.fromPlistText(text);
-    if (fromPlist.isKnown) return fromPlist;
+    if (fromPlist.isKnown) return _Decoded(fromPlist);
+
+    // 走到这里说明配方解不开。此时**资源文件头永远是 `<?xml`**，没有诊断价值；
+    // 真正能说明问题的是 `<data>` 里那段的头：
+    //   78 9c / 78 01 / 78 da → zlib 带头（不是裸 DEFLATE）
+    //   1f 8b                → gzip
+    //   7b 22                → 未压缩的 JSON（`{"`）
+    //   其它                 → 未知容器
+    final payloadHead = _plistPayloadHead(text);
 
     final direct = PhotoFilterInfo.fromEnvelopeBytes(bytes);
-    if (direct.isKnown) return direct;
-    return fromPlist;
+    if (direct.isKnown) return _Decoded(direct, payloadHead);
+    return _Decoded(fromPlist, payloadHead);
   }
+
+  /// 从 XML plist 文本里抠出 `adjustmentData` 的 base64，返回解码后的前 24 字节
+  static String _plistPayloadHead(String text) {
+    final m = RegExp(
+      r'<key>\s*adjustmentData\s*</key>\s*<data>([\s\S]*?)</data>',
+    ).firstMatch(text);
+    if (m == null) return '';
+    try {
+      final raw = base64Decode(m.group(1)!.replaceAll(RegExp(r'\s'), ''));
+      if (raw.isEmpty) return '';
+      return raw
+          .take(24)
+          .map((b) => b.toRadixString(16).padLeft(2, '0'))
+          .join(' ');
+    } catch (_) {
+      return '';
+    }
+  }
+}
+
+/// `_decode` 的返回值：配方结果 + 载荷字节头（只有失败时才有诊断意义）
+class _Decoded {
+  const _Decoded(this.info, [this.payloadHead = '']);
+
+  final PhotoFilterInfo info;
+  final String payloadHead;
 }
 
 /// 一个 effectName 的汇总

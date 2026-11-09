@@ -126,12 +126,9 @@ class PhotoFilterInfo {
     if (envelope.isEmpty) return unknown('配方数据为空');
     if (envelope.length > maxBytes) return unknown('配方数据过大');
 
-    late final List<int> inflated;
-    try {
-      inflated = ZLibDecoder(raw: true).convert(envelope);
-    } catch (_) {
-      // 裸 DEFLATE 解不开，说明不是 iOS 17 的配方结构
-      return unknown('配方解压失败（不是裸 DEFLATE）');
+    final inflated = _inflate(envelope);
+    if (inflated == null) {
+      return unknown('配方解压失败（不是裸 DEFLATE / zlib / gzip / 明文 JSON）');
     }
     if (inflated.length > maxBytes) return unknown('解压后过大');
 
@@ -140,6 +137,35 @@ class PhotoFilterInfo {
     } catch (e) {
       return unknown('配方解析失败（$e）');
     }
+  }
+
+  /// 按字节特征依次尝试四种容器，全失败返回 null。
+  ///
+  /// 为什么不止一种：真机全库扫描里遇到 6 个 `Adjustments.plist`，其
+  /// `<data>` 解出来**不是**裸 DEFLATE（载荷头已记录在扫描报告里）。
+  /// 在拿到确切格式之前，这里按首字节依次试：裸 DEFLATE → zlib 带头
+  /// （`78 xx`）→ gzip（`1f 8b`）→ 明文 JSON（`{`）。
+  ///
+  /// 注意这不会把「解不开」变成「假装解开了」：四种都不是仍然返回未知，
+  /// 由调用方如实显示。
+  static List<int>? _inflate(List<int> envelope) {
+    try {
+      return ZLibDecoder(raw: true).convert(envelope);
+    } catch (_) {
+      // 继续尝试其它容器
+    }
+    if (envelope.length > 1 && envelope[0] == 0x78) {
+      try {
+        return ZLibDecoder().convert(envelope);
+      } catch (_) {}
+    }
+    if (envelope.length > 1 && envelope[0] == 0x1f && envelope[1] == 0x8b) {
+      try {
+        return GZipDecoder().convert(envelope);
+      } catch (_) {}
+    }
+    if (envelope.first == 0x7b) return envelope;
+    return null;
   }
 
   static PhotoFilterInfo _fromRecipeJson(Object? recipe) {
