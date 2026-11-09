@@ -456,6 +456,32 @@ class RestoreManager {
           if (newAssetId == null) {
             throw Exception('写入相册失败');
           }
+
+          // 相册归属（GAP-M1）：**所有写入路径统一在这里放回原相册**。
+          // 放在这个位置而不是各个 save* 分支里，是因为恢复有 4 条写入路径
+          // （视频 / Live Photo / 多资源 / 单文件）。上一版只加在「多资源」那条，
+          // 结果单文件的 PNG 恢复后只进了「最近项目」—— 正是这个坑。
+          if (record.albums.isNotEmpty) {
+            final added = await PhotoLibraryHelper.addAssetsToAlbums(
+              localIdentifier: newAssetId,
+              albums: record.albums,
+            );
+            LogService.instance.write(
+              LogLevel.info,
+              'restore',
+              added > 0
+                  ? '已放回原相册：${record.albums.join("、")}'
+                  : '放回相册失败（${record.albums.join("、")}），照片仍在相册里',
+            );
+          } else {
+            // 区分「没采集到」和「写入失败」：两种情况用户看到的都是
+            // 「照片在最近项目」，但修的地方完全不同
+            LogService.instance.write(
+              LogLevel.info,
+              'restore',
+              '该记录没有相册归属信息，照片进「最近项目」',
+            );
+          }
           return _RestoreOutcome(newAssetId, totalBytes);
         } finally {
           await _safeDelete(File(mainPath));
@@ -579,21 +605,8 @@ Future<String?> _saveWithExtras(
           '$base 恢复完成，${r.written} 个附加资源全部写入（含 RAW 原图与编辑指令）',
         );
       }
-      // 相册归属（GAP-M1）：导入成功后再放回原相册。
-      // 失败只记日志，不改变「已恢复」的判定 —— 照片本身已经在相册里了。
-      if (r.assetId.isNotEmpty && record.albums.isNotEmpty) {
-        final added = await PhotoLibraryHelper.addAssetsToAlbums(
-          localIdentifier: r.assetId,
-          albums: record.albums,
-        );
-        if (added > 0) {
-          LogService.instance.write(
-            LogLevel.info,
-            'restore',
-            '$base 已放回原相册：${record.albums.join("、")}',
-          );
-        }
-      }
+      // 相册归属统一由调用方（_restoreOne）处理，见那里的说明：
+      // 恢复有 4 条写入路径，写回只放在一条分支里会漏掉其它三条。
       return r.assetId;
     } finally {
       for (final f in cleanup) {
