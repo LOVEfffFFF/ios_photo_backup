@@ -140,12 +140,22 @@ node control.cjs $c job <jobId>          # 取结果
 1. **`Mono` 没有 `3D` 前缀**。按 Apple 命名规律推出来的 `3DMono` 是错的。凡是没采到样本的名字一律不写死，这也是本表坚持「有 IMG 编号证据才收录」的原因。
 2. **相机 AAE 与当前配方可能不同**。AAE 是相机拍摄时写入的那份配方，用户在相册改滤镜后，`Adjustments.plist`（当前配方）会变，AAE 未必跟着变。所以「AAE 哈希一致」不能证明「当前滤镜相同」。
 3. **ProRAW 上 `contentEditingInput.adjustmentData` 可能为 nil**。判「是否被编辑」用 `PHAsset.hasAdjustments`，不要用 adjustmentData 是否为空。
-4. **6 个 `Adjustments.plist` 报「配方解压失败（不是裸 DEFLATE）」**。说明存在另一种配方结构（可能旧 schema 或非滤镜类编辑），assetId 已记录，尚未定位：
-   - `6B5C589D-946A-48CB-B9BA-EA717717E6F0`
-   - `C52B7CDB-3C5D-4321-BA1F-8B32E005B358`
-   - `F3944A68-3DF9-4F67-A8A6-05781D1E5C24`
-   - `3081B1AA-1D01-44FD-99C8-A9FC53AA68D6`
-   - `13FC6F32-8AD5-4A7C-9E18-5B1F6ED55A23`
-   - `7519D72A-9E40-42E6-9B60-F3F655094E64`
+4. **有 6 个 `Adjustments.plist` 不是滤镜配方（2026-11-09 已定位）**。
+   文件本身是标准 XML plist（头 `3c 3f 78 6d 6c` = `<?xml`），所以能正常解析；
+   但 `<data>` 里的载荷是 **二进制 plist（`bplist00`）**，不是裸 DEFLATE。
+   按载荷前 24 字节分两类：
+
+   | 载荷头 | 类型 | 资产 |
+   | --- | --- | --- |
+   | `62 70 6c 69 73 74 30 30 d4 … 58 24 76 65 72 73 69`（含 `$version` / `$objects` / `$archiver` / `$top`） | NSKeyedArchiver 归档，另一类编辑数据 | `6B5C589D…`、`C52B7CDB…` |
+   | `62 70 6c 69 73 74 30 30 d1 01 02 5a 73 6c 6f 77 4d 6f 74 69 6f 6e`（`d1` 单键字典 + 串 `slowMotion`） | **慢动作视频调整** | `F3944A68…`、`3081B1AA…`、`13FC6F32…`、`7519D72A…` |
+
+   结论：它们「解不出滤镜」是**正确结果**，不是数据损坏、也不是解析 bug ——
+   这两类载荷本来就没有 `Effect` 项。`hasAdjustments == true` 只表示「有编辑」，
+   不等于「有滤镜」：慢动作视频同样是已编辑。
+   两个 NSKeyedArchiver 归档的具体内容（哪类编辑）尚未深挖。
+
+   > 诊断方法：只看资源文件头没用（永远是 `<?xml`），要看 `<data>` 解码后的
+   > **载荷头**。扫描结果里的 `payloadHeadHex` 就是干这个的。
 5. **扫不全的情况**：某滤镜从未在相册里用过 → 扫不出来；iCloud 原件未下载且网络不可用 → 可能触发 120 秒兜底（结果标记 `timedOut`，只含已读到的部分）。
 6. **`adjustmentTimestamp` 在公开 API 下不可控**。文件时间、资源 import date、request import date、request modification date、`unmanagedAdjustment.adjustmentTimestamp` 五类实验均失败。验收应比「解码后的配方内容」，不比字节。
