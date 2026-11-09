@@ -161,7 +161,9 @@ class PhotoFilterInfo {
     }
     if (envelope.length > 1 && envelope[0] == 0x1f && envelope[1] == 0x8b) {
       try {
-        return GZipDecoder().convert(envelope);
+        // dart:io 里没有 GZipDecoder 这个类（CI 实测报 Method not found），
+        // gzip 是顶层的 GZipCodec 实例，解码走 .decode。
+        return gzip.decode(envelope);
       } catch (_) {}
     }
     if (envelope.first == 0x7b) return envelope;
