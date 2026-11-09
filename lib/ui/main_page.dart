@@ -16,6 +16,7 @@ import '../services/qr_scanner.dart';
 import '../services/server_client.dart';
 import '../services/server_config.dart';
 import 'compare_page.dart';
+import 'effect_scan_page.dart';
 import 'live_debug_page.dart';
 import 'logs_page.dart';
 import 'pick_assets_page.dart';
@@ -1051,6 +1052,24 @@ class _MainPageState extends State<MainPage> {
                               ),
                       icon: const Icon(Icons.bug_report_outlined, size: 15),
                       label: const Text('实时调试',
+                          style: TextStyle(fontSize: 12)),
+                      style: TextButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    ),
+                    // 滤镜扫描：只读相册里已有的配方，不写任何数据。
+                    // 用途是把「effectName → 中文名」这张实测表补齐 ——
+                    // 没挂过的滤镜系统里没有痕迹，只能靠扫已用。
+                    TextButton.icon(
+                      onPressed: _isOperating
+                          ? null
+                          : () => Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                    builder: (_) => const EffectScanPage()),
+                              ),
+                      icon: const Icon(Icons.filter_vintage, size: 15),
+                      label: const Text('滤镜扫描',
                           style: TextStyle(fontSize: 12)),
                       style: TextButton.styleFrom(
                         visualDensity: VisualDensity.compact,

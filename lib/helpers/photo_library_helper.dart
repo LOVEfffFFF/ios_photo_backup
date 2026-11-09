@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import '../models/effect_scan.dart';
 import '../services/log_service.dart';
 
 /// 单个资产的完整信息（对比「备份 vs 原图」用）
@@ -278,7 +279,8 @@ class PhotoLibraryHelper {
   /// 底层是 `PHContentEditingInput`，能取到 iOS **自己的**编辑指令哈希 ——
   /// 这是判断「滤镜有没有被我们写丢」的决定性证据。
   ///
-  /// 拿不到滤镜名称，原因见 [AssetEditingInfo] 的说明。
+  /// 这里只回传 `adjustmentData` 的字节数与 SHA256（`contentEditingInput` 层）。
+  /// **滤镜名要从字节解**：见 [PhotoFilterInfo]，批量扫描见 [scanUsedEffects]。
   ///
   /// 原生侧有 8 秒超时兜底：`requestContentEditingInput` 在需要用户交互时
   /// 可能既不回调也不报错，不设兜底会让这里一直挂着。
@@ -299,6 +301,45 @@ class PhotoLibraryHelper {
       );
       return null;
     }
+  }
+
+  /// 扫描相册里**已经用过**的滤镜（不用逐张点开）
+  ///
+  /// ## 为什么只能「扫已用」
+  /// Apple 不公开滤镜清单，`effectName` 只存在于真实配方里 —— 没挂过的滤镜
+  /// 在系统里没有任何痕迹，无法凭空枚举。
+  ///
+  /// ## 为什么筛资产在原生、解码在 Dart
+  /// 原生按 `PHAsset.hasAdjustments` 筛（同步属性，全库几千张也很快），再读
+  /// 配方资源字节；解压与名称映射复用 [PhotoFilterInfo]，避免两份表漂移。
+  ///
+  /// 返回 null = 没权限或通道异常。
+  static Future<EffectScanResult?> scanUsedEffects({
+    int maxEditedAssets = 3000,
+    int maxTotalBytes = 2 * 1024 * 1024,
+  }) async {
+    try {
+      final raw = await _channel.invokeMethod('scanUsedEffects', {
+        'maxEditedAssets': maxEditedAssets,
+        'maxTotalBytes': maxTotalBytes,
+      });
+      if (raw is Map) {
+        final parsed =
+            EffectScanResult.fromChannel(Map<String, dynamic>.from(raw));
+        if (parsed.error.isNotEmpty) {
+          LogService.instance.write(
+            LogLevel.warn,
+            'edit',
+            '扫描已用滤镜失败：${parsed.error}',
+          );
+          return null;
+        }
+        return parsed;
+      }
+    } catch (e) {
+      LogService.instance.write(LogLevel.warn, 'edit', '扫描已用滤镜异常：$e');
+    }
+    return null;
   }
 
   /// 读取照片的完整信息（真读每个资源的字节，不是查属性）

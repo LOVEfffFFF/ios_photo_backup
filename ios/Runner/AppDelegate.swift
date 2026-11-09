@@ -299,6 +299,8 @@ private func photoBackupSignalHandler(_ sig: Int32) {
             hashAssetResources(call: call, result: result)
         case "analyzeAssetEditing":
             analyzeAssetEditing(call: call, result: result)
+        case "scanUsedEffects":
+            scanUsedEffects(call: call, result: result)
         case "getAssetFullInfo":
             getAssetFullInfo(call: call, result: result)
         case "getAssetThumbnails":
@@ -1970,6 +1972,160 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
                     ])
                 }
             }
+        }
+    }
+
+    // MARK: - 扫描相册里已经用过的滤镜
+
+    /// 把所有「已编辑」资产的配方原始字节回传，由 Dart 侧解出滤镜名与强度。
+    ///
+    /// ## 为什么解码不放在原生
+    /// 配方是 裸 DEFLATE（无 zlib 头）→ UTF-8 JSON。Dart 侧已经有
+    /// `PhotoFilterInfo`：解压、结构校验、effectName → 中文名的实测映射、
+    /// 跨副本比对的签名归一化都在那里。在 Swift 里再实现一遍，既多一条
+    /// 「Compression API 名称靠猜就编不过」的风险，也容易出现两张表漂移。
+    /// **原生只负责把字节读出来。**
+    ///
+    /// ## 为什么先筛 hasAdjustments
+    /// `PHAsset.hasAdjustments` 是同步属性，读它不碰磁盘，全库几千张也能立刻
+    /// 筛完；剩下的才去读资源字节（每个配方 1~2 KB）。
+    ///
+    /// ## 上限
+    /// 通道不是传文件的通道，所以总字节 / 单资源字节 / 资产数都设上限，
+    /// 超了就标 `truncated`，让 Dart 侧如实说「只扫了一部分」。
+    private func scanUsedEffects(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        let args = call.arguments as? [String: Any] ?? [:]
+        let maxEdited = (args["maxEditedAssets"] as? NSNumber)?.intValue ?? 3000
+        let maxBytesPer = (args["maxBytesPerResource"] as? NSNumber)?.intValue ?? 262144
+        let maxTotalBytes = (args["maxTotalBytes"] as? NSNumber)?.intValue ?? 2097152
+
+        PHPhotoLibrary.requestAuthorization { status in
+            guard self.isPhotoLibraryAccessGranted(status) else {
+                DispatchQueue.main.async { result(["error": "没有相册访问权限"]) }
+                return
+            }
+
+            let fetchOptions = PHFetchOptions()
+            fetchOptions.sortDescriptors = [
+                NSSortDescriptor(key: "creationDate", ascending: false)
+            ]
+            let fetch = PHAsset.fetchAssets(with: fetchOptions)
+            let totalAssets = fetch.count
+
+            var edited: [PHAsset] = []
+            fetch.enumerateObjects { asset, _, stop in
+                if asset.hasAdjustments {
+                    edited.append(asset)
+                    if edited.count >= maxEdited { stop.pointee = true }
+                }
+            }
+
+            // 拍平成「资产 × 配方资源」的作业表：只保留一层递归，
+            // 避免嵌套局部函数在 escaping 闭包里捕获自身那种麻烦。
+            var jobs: [(asset: PHAsset, resource: PHAssetResource)] = []
+            for asset in edited {
+                let resources = PHAssetResource.assetResources(for: asset)
+                for r in resources {
+                    let u = r.uniformTypeIdentifier.lowercased()
+                    let isRecipe = u.contains("adjustment")
+                        || u.contains("property-list")
+                        || r.originalFilename.lowercased().hasSuffix(".aae")
+                    if isRecipe { jobs.append((asset, r)) }
+                }
+            }
+
+            let lock = NSLock()
+            var samples: [[String: Any]] = []
+            var totalBytes = 0
+            var sent = false
+            var truncated = jobs.count > 6000
+            if truncated { jobs = Array(jobs.prefix(6000)) }
+
+            let send: (Bool) -> Void = { timedOut in
+                lock.lock()
+                let already = sent
+                if !already { sent = true }
+                let payload = samples
+                let bytes = totalBytes
+                lock.unlock()
+                guard !already else { return }
+                DispatchQueue.main.async {
+                    result([
+                        "scannedAssets": totalAssets,
+                        "editedAssets": edited.count,
+                        "recipeResources": jobs.count,
+                        "readResources": payload.count,
+                        "totalBytes": bytes,
+                        "truncated": truncated,
+                        "timedOut": timedOut,
+                        "samples": payload,
+                    ])
+                }
+            }
+
+            var index = 0
+            func readNext() {
+                // 总量超上限就停：继续读只会让通道里塞更多用不上的字节
+                if totalBytes >= maxTotalBytes {
+                    truncated = true
+                    send(false)
+                    return
+                }
+                guard index < jobs.count else {
+                    send(false)
+                    return
+                }
+                let job = jobs[index]
+                index += 1
+
+                let options = PHAssetResourceRequestOptions()
+                options.isNetworkAccessAllowed = true
+                var buf = Data()
+                var cut = false
+
+                PHAssetResourceManager.default().requestData(
+                    for: job.resource,
+                    options: options,
+                    dataReceivedHandler: { chunk in
+                        if buf.count >= maxBytesPer {
+                            cut = true
+                            return
+                        }
+                        let room = maxBytesPer - buf.count
+                        if chunk.count > room {
+                            buf.append(chunk.prefix(room))
+                            cut = true
+                        } else {
+                            buf.append(chunk)
+                        }
+                    },
+                    completionHandler: { error in
+                        lock.lock()
+                        totalBytes += buf.count
+                        samples.append([
+                            "assetId": job.asset.localIdentifier,
+                            "creationDate":
+                                job.asset.creationDate?.timeIntervalSince1970 ?? 0,
+                            "filename": job.resource.originalFilename,
+                            "uti": job.resource.uniformTypeIdentifier,
+                            "typeRawValue": Int(job.resource.type.rawValue),
+                            "bytes": buf.count,
+                            "truncated": cut,
+                            "base64": buf.base64EncodedString(),
+                            "error": error?.localizedDescription ?? "",
+                        ])
+                        lock.unlock()
+                        readNext()
+                    }
+                )
+            }
+
+            // 单个 iCloud 资源可能长时间不回调：给整个扫描一个兜底，
+            // 到点把已经读到的先交回去，并明确标 timedOut。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 120) {
+                send(true)
+            }
+            readNext()
         }
     }
 
