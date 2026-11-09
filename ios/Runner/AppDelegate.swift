@@ -407,16 +407,18 @@ private func photoBackupSignalHandler(_ sig: Int32) {
             }
 
             let location = asset.location
-            // PHAsset 没有公开的 originalFilename / formatDescriptions 属性，
-            // 但用 KVC 直接读有风险：key 不存在会抛 Objective-C 异常导致闪退。
-            // 因此先走运行时检查确认属性真的存在，再读。
-            var originalFilename = (Self.safeKVC(asset, "originalFilename") as? String) ?? ""
-            if originalFilename.isEmpty, let first = resourceList.first {
-                // 兜底：用资源级文件名（PHAssetResource.originalFilename 是公开的）
-                originalFilename = (first["originalFilename"] as? String) ?? ""
+            // 「原始文件名」这个参数不在 PHAsset 上 —— 公开出处只有资源级的
+            // `PHAssetResource.originalFilename`（主资源那份）。以前先试
+            // safeKVC(asset, "originalFilename")，属性不存在恒为 nil，等于白读。
+            var originalFilename =
+                (resourceList.first?["originalFilename"] as? String) ?? ""
+            if originalFilename.isEmpty {
+                originalFilename = Self.safeKVC(asset, "originalFilename") as? String ?? ""
             }
-            let formatDescriptions =
-                (Self.safeKVC(asset, "formatDescriptions") as? [String]) ?? []
+            // PHAsset 压根没有 formatDescriptions 这个公开属性，KVC 也读不到，
+            // 所以这个字段恒为空 —— 保留只会让人误读成「没有格式信息」。
+            // 明确标成不可用，别让空值冒充结论。
+            let subtypeInfo = Self.subtypeInfo(asset)
             let detail: [String: Any] = [
                 "localIdentifier": asset.localIdentifier,
                 "creationDate": asset.creationDate?.timeIntervalSince1970 ?? 0,
@@ -428,11 +430,17 @@ private func photoBackupSignalHandler(_ sig: Int32) {
                 "isFavorite": asset.isFavorite,
                 "isHidden": asset.isHidden,
                 "originalFilename": originalFilename,
-                "subtypes": Self.subtypeNames(asset),
+                "subtypes": subtypeInfo["names"] ?? [],
+                // 位掩码原值：names 没覆盖到的位也能靠它反推，不再靠猜
+                "subtypeRawValue": subtypeInfo["rawValue"] ?? 0,
+                // 「这张是否被编辑过」的**正确**字段（PHAsset 公开属性）。
+                // 别用 contentEditingInput.adjustmentData 是否为 nil 来判断：
+                // ProRAW 上它恒为 nil，会把已编辑的照片认成没编辑。
+                "hasAdjustments": asset.hasAdjustments,
                 "hasLocation": location != nil,
                 "latitude": location?.coordinate.latitude ?? 0,
                 "longitude": location?.coordinate.longitude ?? 0,
-                "formatDescriptions": formatDescriptions,
+                "formatDescriptionsUnsupported": true,
                 "resourceCount": resourceList.count,
                 "resources": resourceList,
             ]
@@ -457,45 +465,34 @@ private func photoBackupSignalHandler(_ sig: Int32) {
         return nil
     }
 
-    /// mediaSubtypes 转成可读名称（判断是否 Live Photo / HDR / 人像 / RAW …）
+    /// mediaSubtypes 转成可读名称 + 原始位掩码
     ///
-    /// 用 `rawValue` 判断而不是直接引用枚举成员：不同 iOS 版本可用的成员不同
-    /// （例如 `photoHDRGainMap` 在旧 SDK 上不存在），直接引用会编译失败。
-    private static func subtypeNames(_ asset: PHAsset) -> [String] {
-        // PHAssetMediaSubtype 的 rawValue 对照（Apple 未公开文档，故按已知值标注）
-        let names: [Int: String] = [
-            1: "实况照片",        // photoLive
-            2: "全景",                    // photoPanorama
-            3: "HDR",                       // photoHDR
-            4: "增益图",                // photoHDRGainMap
-            5: "人像深度效果",    // photoDepthEffect
-            6: "主体识别",          // photoContentAware
-            8: "RAW 原片",                // photoRAW
-            9: "视频流",                // videoStream
-            10: "Live Photo 视频",        // videoLive
-            11: "高帧率",                // videoHighFps
-            12: "延时摄影",          // videoTimelapse
-            13: "电影效果",          // videoCinematic
-        ]
-        // PHAssetMediaSubtype 的集合在 Swift 里无法直接遍历（元素类型不遵循
-        // Hashable、也不能桥接成 NSSet）。改为逐个询问是否包含已知值——
-        // contains 是集合自带的 API，不需要遍历，兼容性最好。
-        var result: [String] = []
+    /// ## 这里曾经是错的（2026-11-08 修正）
+    ///
+    /// 旧实现把「序号」当成了位掩码：拿 `PHAssetMediaSubtype(rawValue: 8)` 去
+    /// `contains`，可 8 实际是 `.photoLive`（1 << 3）—— 于是**每一张实况照片都
+    /// 被标成「RAW 原片」**，而真正的 ProRAW 一位都没命中（它的位根本不在
+    /// 1…13 这张表里），`subtypes` 恒为空。
+    ///
+    /// 根因：`PHAssetMediaSubtype` 是 **OptionSet（按位）**，不是枚举序号。
+    /// 「RAW 原片」这种相册里看得见的标记，恰恰就是被这个 bug 吞掉的。
+    ///
+    /// 现在改成直接用 SDK 成员判断（名字由编译器保证），并把 `rawValue`
+    /// 原样返回 —— 万一某个位仍未被识别，也能凭 rawValue 反推，不用再猜。
+    private static func subtypeInfo(_ asset: PHAsset) -> [String: Any] {
         let subtypes = asset.mediaSubtypes
-        let probes: [(UInt, String)] = [
-            (1, "实况照片"), (2, "全景"), (3, "HDR"), (4, "增益图"),
-            (5, "人像深度效果"), (6, "主体识别"), (8, "RAW 原片"),
-            (9, "视频流"), (10, "Live Photo 视频"), (11, "高帧率"),
-            (12, "延时摄影"), (13, "电影效果"),
-        ]
-        for (raw, name) in probes {
-            // PHAssetMediaSubtype(rawValue:) 返回非可选值，直接构造后判断
-            let subtype = PHAssetMediaSubtype(rawValue: raw)
-            if subtypes.contains(subtype) {
-                result.append(name)
-            }
+        var names: [String] = []
+        if subtypes.contains(.photoPanorama) { names.append("全景") }
+        if subtypes.contains(.photoHDR) { names.append("HDR") }
+        if subtypes.contains(.photoScreenshot) { names.append("截屏") }
+        if subtypes.contains(.photoLive) { names.append("实况照片") }
+        if subtypes.contains(.photoDepthEffect) { names.append("人像深度") }
+        // ProRAW 的标记（iOS 14+）。它对应的正是相册里那个「RAW / 原片」说明，
+        // 之前因为按序号猜位而从没读到过。
+        if #available(iOS 14.0, *) {
+            if subtypes.contains(.photoRAW) { names.append("RAW 原片") }
         }
-        return result
+        return ["names": names, "rawValue": Int(subtypes.rawValue)]
     }
 
     // MARK: - 查询相册资产是否仍存在
@@ -1686,13 +1683,19 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
                         "duration": asset.duration,
                         "isFavorite": asset.isFavorite,
                         "isHidden": asset.isHidden,
-                        "originalFilename": Self.safeKVC(asset, "originalFilename") as? String ?? "",
-                        "subtypes": Self.subtypeNames(asset),
+                        // PHAsset 没有 originalFilename 这个属性（KVC 取不到，
+                        // 详情页于是长期显示「（无）」）。真正公开的出处是
+                        // PHAssetResource.originalFilename —— 用主资源那份。
+                        "originalFilename": resources.first?.originalFilename ?? "",
+                        "subtypes": (Self.subtypeInfo(asset)["names"] as? [String]) ?? [],
+                        "subtypeRawValue": (Self.subtypeInfo(asset)["rawValue"] as? Int) ?? 0,
+                        "hasAdjustments": asset.hasAdjustments,
                         "hasLocation": asset.location != nil,
                         "latitude": asset.location?.coordinate.latitude ?? 0,
                         "longitude": asset.location?.coordinate.longitude ?? 0,
-                        "formatDescriptions":
-                            (Self.safeKVC(asset, "formatDescriptions") as? [String]) ?? [],
+                        // 同 getAssetDiagnostics：PHAsset 没有 formatDescriptions，
+                        // 恒为空值不该冒充「没有格式信息」。
+                        "formatDescriptionsUnsupported": true,
                         "resourceCount": resources.count,
                         "resources": rows,
                         "editing": editing,

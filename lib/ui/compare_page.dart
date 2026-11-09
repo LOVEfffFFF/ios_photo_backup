@@ -505,12 +505,14 @@ class _ComparePageState extends State<ComparePage> {
         '媒体类型',
         record?.mediaType ?? '无对应记录',
         phone.typeLabel,
-        // 之前写死 null，两边明明都是 image 却标「未记录」——
-        // 那一堆橙色叹号里混着真问题，看着像坏了，其实只是没判。
-        record != null ? record!.mediaType == phone.typeLabel : null,
+        // 比的是**同一个参数**：备份侧 mediaType 是 image/video/live_photo，
+        // 手机侧只有 image/video，实况要由 mediaSubtype 的 photoLive 位补出来。
+        record != null ? record!.mediaType == phone.backupMediaType : null,
       ),
-      _Row('拍摄模式', '未记录',
-          phone.subtypes.isEmpty ? '（无特殊模式）' : phone.subtypes.join('、'), null),
+      // 子类型是独立参数（RAW 原片 / 实况 / HDR / 人像深度 / 全景 / 截屏…），
+      // 备份清单目前不记录它，所以不给一致性判定，免得把「没记」显示成「不一致」。
+      _Row('媒体子类型', '未记录',
+          phone.subtypes.isEmpty ? '（无标记）' : phone.subtypes.join('、'), null),
       _Row(
         '文件构成',
         // 原先这里硬编码「（备份侧只存了 1 个文件）」——那是 GAP-R1 修好之前

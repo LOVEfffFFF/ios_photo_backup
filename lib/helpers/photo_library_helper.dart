@@ -20,6 +20,10 @@ class AssetDetail {
   final bool isHidden;
   final String originalFilename;
   final List<String> subtypes;
+
+  /// `PHAssetMediaSubtype.rawValue`（**位掩码**，不是序号）
+  final int subtypeRawValue;
+
   final bool hasLocation;
   final List<AssetResourceInfo> resources;
 
@@ -35,6 +39,7 @@ class AssetDetail {
     required this.isHidden,
     required this.originalFilename,
     required this.subtypes,
+    this.subtypeRawValue = 0,
     required this.hasLocation,
     required this.resources,
   });
@@ -44,7 +49,21 @@ class AssetDetail {
 
   String get sizeLabel => '${pixelWidth}×$pixelHeight';
 
-  String get typeLabel => subtypes.isEmpty ? mediaType : subtypes.join('、');
+  /// 「媒体类型」和「媒体子类型」是两个不同参数，不能互相顶替。
+  ///
+  /// `PHAssetMediaType` 只有 image / video（Live Photo **不是** mediaType，
+  /// 它是 mediaSubtype 里的一位）。以前这里直接返回 `subtypes.join()`，
+  /// 于是「实况照片」被当成媒体类型拿去和备份侧的 mediaType 比，恒判不一致。
+  String get typeLabel =>
+      subtypes.isEmpty ? mediaType : '$mediaType（${subtypes.join('、')}）';
+
+  /// 实况照片标记：`PHAssetMediaSubtype.photoLive` = 1 << 3 = 8
+  bool get isLivePhoto => (subtypeRawValue & (1 << 3)) != 0;
+
+  /// 备份清单里的 mediaType 口径（image / video / live_photo），由
+  /// 「mediaType + 实况位」推导出来，才是能和备份侧对比的同一个参数。
+  String get backupMediaType =>
+      mediaType == 'video' ? 'video' : (isLivePhoto ? 'live_photo' : mediaType);
 
   factory AssetDetail.fromMap(Map<String, dynamic> m) {
     final res = <AssetResourceInfo>[];
@@ -68,6 +87,7 @@ class AssetDetail {
       subtypes: ((m['subtypes'] as List<dynamic>?) ?? const [])
           .map((e) => e.toString())
           .toList(),
+      subtypeRawValue: (m['subtypeRawValue'] as num?)?.toInt() ?? 0,
       hasLocation: m['hasLocation'] == true,
       resources: res,
     );
@@ -1263,7 +1283,9 @@ class AssetFullInfo {
     required this.hasLocation,
     required this.latitude,
     required this.longitude,
-    required this.formatDescriptions,
+    required this.formatDescriptionsUnsupported,
+    required this.subtypeRawValue,
+    required this.hasAdjustments,
     required this.resources,
     required this.editing,
   });
@@ -1285,7 +1307,22 @@ class AssetFullInfo {
   final bool hasLocation;
   final double latitude;
   final double longitude;
-  final List<String> formatDescriptions;
+  /// PHAsset 没有任何公开的格式描述属性（KVC 也取不到），原生侧明确标为不可用。
+  /// 保留一个恒空的列表只会让人误读成「这张没有格式信息」。
+  final bool formatDescriptionsUnsupported;
+
+  /// `PHAssetMediaSubtype.rawValue` 原值。
+  ///
+  /// 它是 **OptionSet 位掩码**（1<<0 全景、1<<1 HDR、1<<2 截屏、1<<3 实况、
+  /// 1<<4 人像深度、1<<5 ProRAW …），不是枚举序号 —— 相册里那个「原片 / RAW」
+  /// 说明对应的就是 `photoRAW` 位。名称没覆盖到的位可以凭这个值反推。
+  final int subtypeRawValue;
+
+  /// `PHAsset.hasAdjustments`：相册是否认为这张被编辑过。
+  ///
+  /// 这是公开属性，比 `contentEditingInput.adjustmentData != nil` 可靠 ——
+  /// ProRAW 上后者恒为 nil，会把已编辑的照片认成没编辑。
+  final bool hasAdjustments;
 
   /// 逐个真读一遍的资源明细，见 [AssetResourceDetail]
   final List<AssetResourceDetail> resources;
@@ -1337,7 +1374,10 @@ class AssetFullInfo {
       hasLocation: raw['hasLocation'] == true,
       latitude: (raw['latitude'] as num?)?.toDouble() ?? 0,
       longitude: (raw['longitude'] as num?)?.toDouble() ?? 0,
-      formatDescriptions: strings('formatDescriptions'),
+      formatDescriptionsUnsupported:
+          raw['formatDescriptionsUnsupported'] == true,
+      subtypeRawValue: (raw['subtypeRawValue'] as num?)?.toInt() ?? 0,
+      hasAdjustments: raw['hasAdjustments'] == true,
       resources: rows().map(AssetResourceDetail.fromChannel).toList(),
       // `.cast()` 是惰性视图，元素类型不符时会在**访问时**才炸；
       // from() 是当场拷贝，行为可预期。

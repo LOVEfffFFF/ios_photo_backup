@@ -198,7 +198,8 @@ class DebugPhotoExecutor implements DebugExecutor {
       'hasLocation': detail.hasLocation,
       'latitude': full?.latitude ?? 0,
       'longitude': full?.longitude ?? 0,
-      'formatDescriptions': full?.formatDescriptions ?? const <String>[],
+      'subtypeRawValue': full?.subtypeRawValue ?? 0,
+      'assetHasAdjustments': full?.hasAdjustments ?? false,
       'resourceCount': detail.resourceCount,
       // iOS 自己那份编辑输入（PHContentEditingInput）。
       // 判「相册是否认为这张被编辑过」靠它，与资源里的 plist 是两条独立证据。

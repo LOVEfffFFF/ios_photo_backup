@@ -118,6 +118,10 @@ class _AssetDetailPageState extends State<AssetDetailPage> {
       _kv('媒体类型', i.mediaType),
       _kv('媒体子类型',
           i.subtypes.isEmpty ? '（无）' : i.subtypes.join('、')),
+      // 名称由原生按 SDK 成员判定；位掩码原值一起给出，名称没覆盖到的位
+      // 也能自己反推，不用再猜「8 是不是 RAW」这种序号式误解。
+      _kv('子类型位掩码',
+          '0x${i.subtypeRawValue.toRadixString(16)}（${i.subtypeRawValue}）'),
       _kv('像素', '${i.pixelWidth}×${i.pixelHeight}'),
       _kv('拍摄时间', _fmt(i.creationDate)),
       _kv('修改时间', _fmt(i.modificationDate)),
@@ -127,7 +131,8 @@ class _AssetDetailPageState extends State<AssetDetailPage> {
       _kv('位置', i.hasLocation ? '${i.latitude.toStringAsFixed(5)}, '
           '${i.longitude.toStringAsFixed(5)}' : '无'),
       _kv('格式描述',
-          i.formatDescriptions.isEmpty ? '（无）' : i.formatDescriptions.join('、')),
+          i.formatDescriptionsUnsupported ? '公开 API 不可读（不是「没有」）' : '（无）'),
+      _kv('相册判定已编辑', i.hasAdjustments ? '是' : '否'),
 
       _header('资源构成（${i.resourceCount} 个 · 合计 ${_size(i.totalBytes)}）'),
       const Padding(
