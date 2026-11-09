@@ -40,7 +40,9 @@ class PhotoFilterInfo {
     this.signature,
   });
 
-  /// `known` 已知滤镜 / `none` 无显式滤镜项 / `unknown` 解析不了
+  /// `known` 已知滤镜 / `none` 原片（无启用的 Effect）/
+  /// `notFilter` 读懂了，但它是另一类编辑（慢动作、归档）而不是滤镜 /
+  /// `unknown` 真的解析不了
   final String status;
 
   final String description;
@@ -60,7 +62,10 @@ class PhotoFilterInfo {
   /// 解码后配方上限，防止解压炸弹
   static const int maxBytes = 1024 * 1024;
 
-  /// 是否成功解析出配方（`none` 也算：只是没有显式的 Effect 项）
+  /// 是否读懂了这份配方。
+  ///
+  /// `none`（原片）与 `notFilter`（慢动作/归档等非滤镜编辑）都算「读懂了」——
+  /// 它们共同点是**没有滤镜**，不能因为没滤镜就当成解析失败。
   bool get isKnown => status != 'unknown';
 
   String get display =>
@@ -128,6 +133,12 @@ class PhotoFilterInfo {
 
     final inflated = _inflate(envelope);
     if (inflated == null) {
+      final kind = _describeContainer(envelope);
+      if (kind != null) {
+        // 读懂了「它是什么」，只是它不是滤镜。单独标 notFilter，
+        // 不要混进「解码失败」——那会让用户以为照片数据坏了。
+        return PhotoFilterInfo._('notFilter', '不是滤镜：$kind');
+      }
       return unknown('配方解压失败（不是裸 DEFLATE / zlib / gzip / 明文 JSON）');
     }
     if (inflated.length > maxBytes) return unknown('解压后过大');
@@ -137,6 +148,32 @@ class PhotoFilterInfo {
     } catch (e) {
       return unknown('配方解析失败（$e）');
     }
+  }
+
+  /// 识别「不是滤镜」的配方容器，认不出返回 null。
+  ///
+  /// 2026-11-09 实测：6 个 `Adjustments.plist` 的 `<data>` 载荷是
+  /// **二进制 plist（`bplist00`）**，其中 4 个只含 `slowMotion` 键
+  /// （慢动作视频调整），2 个是 `NSKeyedArchiver` 归档（`$version` /
+  /// `$objects` / `$archiver` / `$top`）。它们本来就没有 `Effect` 项，
+  /// 所以「解不出滤镜」是正确结果，不是数据损坏。
+  ///
+  /// bplist 里的字符串是明文存储的，一次 ASCII 探针足以分类，
+  /// 不必为此实现完整的二进制 plist 解析器。
+  static String? _describeContainer(List<int> bytes) {
+    const magic = [0x62, 0x70, 0x6c, 0x69, 0x73, 0x74, 0x30, 0x30]; // "bplist00"
+    if (bytes.length < magic.length) return null;
+    for (var i = 0; i < magic.length; i++) {
+      if (bytes[i] != magic[i]) return null;
+    }
+    final ascii = String.fromCharCodes(
+      bytes.map((b) => (b >= 0x20 && b < 0x7f) ? b : 0x20),
+    );
+    if (ascii.contains('slowMotion')) return '慢动作视频调整（slowMotion）';
+    if (ascii.contains(r'$archiver')) {
+      return 'NSKeyedArchiver 归档（另一类编辑数据）';
+    }
+    return '二进制 plist（bplist00）';
   }
 
   /// 按字节特征依次尝试四种容器，全失败返回 null。

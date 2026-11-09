@@ -123,6 +123,14 @@ class EffectScanResult {
           ' · 资产 ${s.assetCount}'
           '${s.intensities.isEmpty ? '' : ' · 强度 ${s.intensityText}'}');
     }
+    // 慢动作 / NSKeyedArchiver 归档：读懂了，只是不是滤镜，单独说明
+    final notFilter =
+        samples.where((s) => s.recipe.status == 'notFilter').toList();
+    if (notFilter.isNotEmpty) {
+      final kinds =
+          notFilter.map((s) => s.recipe.description).toSet().join('；');
+      b.writeln('非滤镜配方 ${notFilter.length} 个（算作原片）：$kinds');
+    }
     final unknown = samples.where((s) => !s.recipe.isKnown).toList();
     if (unknown.isNotEmpty) {
       b.writeln('解码失败 ${unknown.length} 个：');
