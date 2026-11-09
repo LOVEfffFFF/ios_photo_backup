@@ -12,9 +12,14 @@ import '../models/photo_filter_info.dart';
 
 /// 调试通道能执行的任务
 ///
-/// 只有两种，且都**作用在调试会话里选中的照片**上：
+/// 前两种**作用在调试会话里选中的照片**上：
 ///   · `inspect`   —— 只读。回读资源清单、编辑附件字节、解码后的配方
 ///   · `roundTrip` —— 会创建副本。备份 → 恢复到相册 → 与原图逐项对比
+///
+/// 第三种覆盖全库（只读，不建副本、不写相册）：
+///   · `scanEffects` —— 扫出相册里**已经用过**的全部滤镜（effectName + 强度），
+///     用于补齐「effectName → 中文名」的实测表。它不受选中范围限制，因为
+///     滤镜清单只能从真实配方里反推，抽样十张没有意义。
 ///
 /// 没有"执行任意原生方法"的口子，也不提供删除原图的能力。
 abstract class DebugExecutor {
@@ -100,6 +105,17 @@ class DebugPhotoExecutor implements DebugExecutor {
     String importVariant = 'baseline',
   }) async {
     if (_running) throw StateError('已有调试任务正在执行');
+    // 全库滤镜扫描：不作用于「会话里选中的照片」，所以不受 target 白名单限制。
+    // 它只读（不建副本、不写相册），且必须覆盖全库才有意义 ——
+    // Apple 不公开滤镜清单，effectName 只能从「已经用过的配方」里反推。
+    if (kind == 'scanEffects') {
+      _running = true;
+      try {
+        return await scanEffectsAll();
+      } finally {
+        _running = false;
+      }
+    }
     final record = records[target];
     final id = record?.localIdentifier ?? _copies[target];
     if (id == null || !['inspect', 'roundTrip'].contains(kind)) {
@@ -172,6 +188,50 @@ class DebugPhotoExecutor implements DebugExecutor {
     } finally {
       _running = false;
     }
+  }
+
+  /// 全库只读扫描：相册里已经用过的滤镜，按 effectName 去重汇总
+  ///
+  /// 回传里**不带配方原始字节**（调试结果要过 JSON 通道，塞进去毫无用处）：
+  /// 解码在手机侧完成，电脑只需拿到「有哪些滤镜、各出现几次、强度多少」。
+  static Future<Map<String, dynamic>> scanEffectsAll() async {
+    final result = await PhotoLibraryHelper.scanUsedEffects();
+    if (result == null) {
+      throw StateError('扫描失败：没有相册权限，或原生通道异常');
+    }
+    return {
+      'scannedAssets': result.scannedAssets,
+      'editedAssets': result.editedAssets,
+      'recipeResources': result.recipeResources,
+      'totalBytes': result.totalBytes,
+      'truncated': result.truncated,
+      'timedOut': result.timedOut,
+      'stats': [
+        for (final s in result.stats)
+          {
+            'effectName': s.effectName,
+            'label': s.label,
+            'sampleCount': s.sampleCount,
+            'assetCount': s.assetCount,
+            'intensities': s.intensities,
+            'isNoFilter': s.isNoFilter,
+          },
+      ],
+      // 明细只留前 300 条：够看清每条配方的强度与来源，又不至于把结果撑爆
+      'samples': [
+        for (final s in result.samples.take(300))
+          {
+            'assetId': s.assetId,
+            'filename': s.filename,
+            'typeRawValue': s.typeRawValue,
+            'status': s.recipe.status,
+            'effectName': s.recipe.identifier,
+            'intensity': s.recipe.intensity,
+            'note': s.recipe.description,
+          },
+      ],
+      'report': result.report,
+    };
   }
 
   /// 只读回读：资源清单 + 各资源哈希 + 编辑附件（解码后的配方）
