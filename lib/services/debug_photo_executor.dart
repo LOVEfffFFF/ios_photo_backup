@@ -228,6 +228,8 @@ class DebugPhotoExecutor implements DebugExecutor {
             'effectName': s.recipe.identifier,
             'intensity': s.recipe.intensity,
             'note': s.recipe.description,
+            // 只对解压/解析失败的样本回传字节头：成功的不需要，省通道体积
+            if (!s.recipe.isKnown) 'headHex': s.headHex,
           },
       ],
       'report': result.report,

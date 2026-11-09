@@ -2111,6 +2111,12 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
                             "typeRawValue": Int(job.resource.type.rawValue),
                             "bytes": buf.count,
                             "truncated": cut,
+                            // 前 24 字节的十六进制：解压失败时这是唯一线索
+                            // —— 能立刻看出是 bplist00 / PK / 其它容器，
+                            // 而不是只有一个「不是裸 DEFLATE」的结论。
+                            "headHex": buf.prefix(24)
+                                .map { String(format: "%02x", $0) }
+                                .joined(separator: " "),
                             "base64": buf.base64EncodedString(),
                             "error": error?.localizedDescription ?? "",
                         ])

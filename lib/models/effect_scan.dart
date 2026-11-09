@@ -126,8 +126,9 @@ class EffectScanResult {
     final unknown = samples.where((s) => !s.recipe.isKnown).toList();
     if (unknown.isNotEmpty) {
       b.writeln('解码失败 ${unknown.length} 个：');
-      for (final s in unknown.take(10)) {
+      for (final s in unknown.take(20)) {
         b.writeln('  ${s.filename}: ${s.recipe.description}');
+        if (s.headHex.isNotEmpty) b.writeln('      head=${s.headHex}');
       }
     }
     return b.toString();
@@ -149,6 +150,7 @@ class EffectScanSample {
     required this.bytes,
     required this.truncated,
     required this.error,
+    required this.headHex,
     required this.recipe,
   });
 
@@ -162,6 +164,13 @@ class EffectScanSample {
   final int bytes;
   final bool truncated;
   final String error;
+
+  /// 资源前 24 字节的十六进制。
+  ///
+  /// 解压失败时这是唯一的格式线索：`62 70 6c 69 73 74` = `bplist`、
+  /// `50 4b` = zip、`1f 8b` = gzip、`78 9c` = 带头的 zlib …… 只看
+  /// 「不是裸 DEFLATE」这一句永远查不下去。
+  final String headHex;
 
   /// 解码后的配方（见 [PhotoFilterInfo]）
   final PhotoFilterInfo recipe;
@@ -188,6 +197,7 @@ class EffectScanSample {
       bytes: (m['bytes'] as num?)?.toInt() ?? 0,
       truncated: m['truncated'] == true,
       error: transportError,
+      headHex: '${m['headHex'] ?? ''}',
       recipe: _decode(
         bytes,
         decodeError.isNotEmpty ? decodeError : transportError,
