@@ -838,12 +838,15 @@ class PhotoLibraryHelper {
     required double creationTimestamp,
     List<Map<String, String>> extras = const [],
     String mainFilename = '',
+    bool allowUnpaired = false,
   }) async {
     try {
       final raw = await _channel.invokeMethod('savePhotoWithExtras', {
         'filePath': filePath,
         'creationDate': creationTimestamp * 1000,
         if (extras.isNotEmpty) 'extraResources': extras,
+        // 仅调试实验用：允许「只有配方、没有渲染图」的写法
+        if (allowUnpaired) 'allowUnpaired': true,
         // 主文件原名（清单里的 main 条目）—— 相册里显示原名而不是暂存名
         if (mainFilename.isNotEmpty) 'mainFilename': mainFilename,
       });

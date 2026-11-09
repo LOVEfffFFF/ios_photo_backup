@@ -418,6 +418,8 @@ class DebugPhotoExecutor implements DebugExecutor {
           },
       ],
       mainFilename: record.relativePath.split('/').last,
+      // norender 变体：故意只写配方，验证 iOS 会不会按配方自己重渲染
+      allowUnpaired: !writeRender,
     );
     out['written'] = saved.written;
     out['failed'] = saved.failed;
@@ -582,6 +584,7 @@ class DebugPhotoExecutor implements DebugExecutor {
             },
         ],
         mainFilename: 'probe_${effect}_${(intensity * 100).round()}.dng',
+        allowUnpaired: !writeRender,
       );
       if (saved.assetId.isNotEmpty) await _track(saved.assetId);
       (out['items'] as List).add({

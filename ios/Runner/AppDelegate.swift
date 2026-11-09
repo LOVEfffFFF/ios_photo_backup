@@ -1057,9 +1057,12 @@ private func savePhotoWithExtras(call: FlutterMethodCall, result: @escaping Flut
     //
     // ios_photo_backup_openai 的真机结论：三者一次性提交时 iOS 全部接受，
     // 副本在系统相册里滤镜名、强度、RAW 标记、还原再编辑都正常。
+    // 实验开关：调试通道用 allowUnpaired 单独写配方，验证 iOS 会不会按配方
+    // 自己重渲染。正常恢复路径永远走下面的成对检查。
+    let allowUnpaired = (args["allowUnpaired"] as? Bool) ?? false
     let hasRecipe = extras.contains { $0.type == .adjustmentData }
     let hasRender = extras.contains { $0.type == .fullSizePhoto }
-    if hasRecipe != hasRender {
+    if hasRecipe != hasRender && !allowUnpaired {
         AppDelegate.appendLogLine(
             "[error] 编辑配方与渲染图不成对，拒绝导入"
             + "（有配方=\(hasRecipe) 有渲染图=\(hasRender)）")
