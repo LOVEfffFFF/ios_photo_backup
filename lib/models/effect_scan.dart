@@ -240,7 +240,7 @@ class EffectNameStat {
   bool get isMapped => label != null;
 
   String get display {
-    if (isNoFilter) return '（无滤镜项：只有裁剪/调整等操作）';
+    if (isNoFilter) return '原片（未套用滤镜）';
     if (label != null) return '$label（$effectName）';
     return '$effectName（中文名未采集）';
   }

@@ -85,6 +85,20 @@ class PhotoFilterInfo {
     // 解出来都是 3DDramaticWarm，用户在相册编辑界面确认名字是「反差暖色」。
     // 两处独立命中 + 用户肉眼确认，可以收录。
     '3DDramaticWarm': '反差暖色',
+    // ---- 2026-11-09：全库扫描补齐剩下 4 个 ----
+    // 手机相册 33,420 个资产、168 个已编辑、252 个配方资源全部读回解码，
+    // 9 个 effectName 全数命中；用户按 IMG 编号逐一给了界面名字：
+    //   IMG_7685 原片（配方里没有 Effect 项，不是滤镜）
+    //   IMG_7686 鲜明    IMG_7687 鲜暖色  IMG_7688 鲜冷色
+    //   IMG_7689 反差色  IMG_7690 反差暖色 IMG_7691 反差冷色
+    //   IMG_7692 单色    IMG_7693 银色调  IMG_7694 黑白
+    //
+    // 注意 `Mono` **没有** `3D` 前缀 —— 按 Apple 命名规律推出来的「3DMono」
+    // 是错的，这也是为什么没有样本的名字一律不写死。
+    '3DVividCool': '鲜冷色',
+    '3DDramaticCool': '反差冷色',
+    'Mono': '单色',
+    '3DSilverplate': '银色调',
   };
 
   /// 从 plist 文本（`Adjustments.plist` / `.aae`）解析
@@ -148,7 +162,9 @@ class PhotoFilterInfo {
     if (effects.isEmpty) {
       return PhotoFilterInfo._(
         'none',
-        '无显式滤镜项',
+        // 相册里对这种照片的说明就是「原片」：配方有效、但没有启用的 Effect
+        // （可能仍有裁剪/调整/RAW 解码）。说「无显式滤镜项」用户看不懂。
+        '原片（未套用滤镜）',
         operationCount: operations.length,
         signature: signature,
       );
