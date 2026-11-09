@@ -274,7 +274,7 @@ class DebugPhotoExecutor implements DebugExecutor {
   /// ## 副本必须三件套
   /// DNG（`.photo`）+ 配方（`.adjustmentData`）+ 渲染图（`.fullSizePhoto`）。
   /// 配方与渲染图缺一不可，只写配方会被拒。
-  static Future<Map<String, dynamic>> probeFilter(
+  Future<Map<String, dynamic>> probeFilter(
     BackupRecord record, {
     required String effectName,
     required double intensity,
