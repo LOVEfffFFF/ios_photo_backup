@@ -487,10 +487,15 @@ private func photoBackupSignalHandler(_ sig: Int32) {
         if subtypes.contains(.photoScreenshot) { names.append("截屏") }
         if subtypes.contains(.photoLive) { names.append("实况照片") }
         if subtypes.contains(.photoDepthEffect) { names.append("人像深度") }
-        // ProRAW 的标记（iOS 14+）。它对应的正是相册里那个「RAW / 原片」说明，
+        // ProRAW 的标记。它对应的正是相册里那个「RAW / 原片」说明，
         // 之前因为按序号猜位而从没读到过。
-        if #available(iOS 14.0, *) {
-            if subtypes.contains(.photoRAW) { names.append("RAW 原片") }
+        //
+        // 这里必须用位值而不是成员名：CI 实测
+        // `error: type 'PHAssetMediaSubtype' has no member 'photoRAW'`
+        // —— 当前 SDK 根本没这个成员。官方位定义是
+        // `PHAssetMediaSubtypePhotoRAW = 1 << 5`（iOS 14+）。
+        if subtypes.contains(PHAssetMediaSubtype(rawValue: 1 << 5)) {
+            names.append("RAW 原片")
         }
         return ["names": names, "rawValue": Int(subtypes.rawValue)]
     }
