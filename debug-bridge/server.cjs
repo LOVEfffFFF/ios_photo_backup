@@ -143,11 +143,14 @@ function createBridge({directory, pairToken = String(crypto.randomInt(100000, 10
         if (!session || !session.status.enabled || now() - session.lastSeen > 15000) throw fail(409, 'Phone is offline');
         // scanEffects 覆盖全库、只读，不作用于选中照片，因此没有 target
         const scanEffects = body.kind === 'scanEffects';
-        if (!['inspect', 'roundTrip', 'scanEffects'].includes(body.kind)) throw fail(400, 'Unsupported command');
+        // filterProbe 复用 importVariant 传参：probe:<effectName>:<intensity>
+        const filterProbe = body.kind === 'filterProbe';
+        if (!['inspect', 'roundTrip', 'scanEffects', 'filterProbe'].includes(body.kind)) throw fail(400, 'Unsupported command');
         if (!scanEffects && !validKey(body.target)) throw fail(400, 'Unsupported command');
         const variant = body.importVariant ?? 'baseline';
-        if (!importVariants.has(variant) || (variant !== 'baseline' && body.kind !== 'roundTrip')) throw fail(400, 'Unsupported import variant');
-        if (!session.importVariants.includes(variant)) throw fail(409, 'Install the timestamp test build on phone first');
+        if (!filterProbe && (!importVariants.has(variant) || (variant !== 'baseline' && body.kind !== 'roundTrip'))) throw fail(400, 'Unsupported import variant');
+        if (!filterProbe && !session.importVariants.includes(variant)) throw fail(409, 'Install the timestamp test build on phone first');
+        if (filterProbe && !/^probe:[A-Za-z0-9_]+:[0-9]*\.?[0-9]+$/.test(String(body.importVariant || ''))) throw fail(400, 'filterProbe needs importVariant=probe:<effectName>:<intensity>');
         const original = !scanEffects && session.assets.some(a => a.key === body.target);
         const copy = !scanEffects && session.copies.some(a => a.key === body.target);
         if (!scanEffects && !original && !copy) throw fail(403, 'Target was not selected on phone');

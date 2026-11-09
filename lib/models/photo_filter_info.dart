@@ -150,6 +150,32 @@ class PhotoFilterInfo {
     }
   }
 
+  /// 把 envelope 解成**原始配方 JSON**（不做滤镜语义解析）
+  ///
+  /// 用于「改造配方再写回相册」：需要保留 Effect 之外的全部字段
+  /// （`metadata` / `versionInfo` / `RKRawDecodeOperation` 的 `boostParams`…），
+  /// 只靠 [PhotoFilterInfo] 的语义结果拿不到这些。
+  static Map<String, dynamic>? rawRecipeJson(List<int> envelope) {
+    if (envelope.isEmpty) return null;
+    final inflated = _inflate(envelope);
+    if (inflated == null) return null;
+    try {
+      final obj = jsonDecode(utf8.decode(inflated));
+      return obj is Map ? Map<String, dynamic>.from(obj) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 把配方 JSON 压回 envelope（裸 DEFLATE，无 zlib 头）
+  static List<int>? encodeRecipeJson(Map<String, dynamic> recipe) {
+    try {
+      return ZLibEncoder(raw: true).convert(utf8.encode(jsonEncode(recipe)));
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// 识别「不是滤镜」的配方容器，认不出返回 null。
   ///
   /// 2026-11-09 实测：6 个 `Adjustments.plist` 的 `<data>` 载荷是

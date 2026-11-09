@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../helpers/file_helper.dart';
 import '../helpers/photo_library_helper.dart';
@@ -112,6 +113,26 @@ class DebugPhotoExecutor implements DebugExecutor {
       _running = true;
       try {
         return await scanEffectsAll();
+      } finally {
+        _running = false;
+      }
+    }
+    // 滤镜写入实验：目标必须是本次会话勾选的照片（拿它当母本），
+    // 参数用 importVariant 编码成 `probe:<effectName>:<intensity>`，
+    // 这样不必改动任务结构就能把参数传进来。
+    if (kind == 'filterProbe') {
+      final m = RegExp(r'^probe:([^:]+):([0-9]*\.?[0-9]+)$').firstMatch(importVariant);
+      final record = records[target];
+      if (m == null || record == null) {
+        throw StateError('filterProbe 需要 probe:<effectName>:<intensity>，且目标是已选照片');
+      }
+      _running = true;
+      try {
+        return await probeFilter(
+          record,
+          effectName: m.group(1)!,
+          intensity: double.parse(m.group(2)!),
+        );
       } finally {
         _running = false;
       }
@@ -235,6 +256,224 @@ class DebugPhotoExecutor implements DebugExecutor {
       ],
       'report': result.report,
     };
+  }
+
+  /// 构造一份配方写进相册副本，验证 iOS 是否接受任意 `effectName`
+  ///
+  /// ## 为什么只能这么测
+  /// 公开 API 没有「给照片选一个系统滤镜」的入口 —— 相册编辑的写入协议是
+  /// `PHContentEditingOutput.adjustmentData` **由编辑方自己提供**。所以要穷举
+  /// 9 个滤镜 × 各档强度，只能自己造配方写副本，再读回看 iOS 认不认。
+  ///
+  /// ## 配方不凭空编
+  /// 把**原图那份配方**解成 JSON，只替换 `Effect.settings` 的 `effectName` /
+  /// `effectIntensity`；`metadata`、`versionInfo`、`RKRawDecodeOperation` 的
+  /// `boostParams` 全部原样保留。少一个字段都可能被 iOS 拒收，那样测出来的
+  /// 「失败」是假的。
+  ///
+  /// ## 副本必须三件套
+  /// DNG（`.photo`）+ 配方（`.adjustmentData`）+ 渲染图（`.fullSizePhoto`）。
+  /// 配方与渲染图缺一不可，只写配方会被拒。
+  static Future<Map<String, dynamic>> probeFilter(
+    BackupRecord record, {
+    required String effectName,
+    required double intensity,
+  }) async {
+    final out = <String, dynamic>{
+      'requestedEffect': effectName,
+      'requestedIntensity': intensity,
+    };
+    final id = record.localIdentifier;
+
+    // ---- 1. 取原配方（plist 文本 → adjustmentData → envelope → JSON）
+    final full = await PhotoLibraryHelper.getAssetFullInfo(id);
+    String? plistB64;
+    var templateName = '';
+    for (final r in full?.resources ?? const <AssetResourceDetail>[]) {
+      final u = r.uti.toLowerCase();
+      if (r.base64.isNotEmpty &&
+          (u.contains('adjustment') || u.contains('property-list'))) {
+        plistB64 = r.base64;
+        templateName = r.filename;
+        break;
+      }
+    }
+    if (plistB64 == null) {
+      throw StateError('原图没有可读的调整配方资源，做不了模板');
+    }
+    out['template'] = templateName;
+
+    final plistText = utf8.decode(base64Decode(plistB64), allowMalformed: true);
+    final dataMatch = RegExp(
+      r'<key>\s*adjustmentData\s*</key>\s*<data>([\s\S]*?)</data>',
+    ).firstMatch(plistText);
+    if (dataMatch == null) throw StateError('模板 plist 里没有 adjustmentData');
+
+    final envelope =
+        base64Decode(dataMatch.group(1)!.replaceAll(RegExp(r'\s'), ''));
+    final recipe = PhotoFilterInfo.rawRecipeJson(envelope);
+    if (recipe == null) throw StateError('模板配方解不开（不是裸 DEFLATE）');
+    out['templateAdjustments'] = [
+      for (final a
+          in ((recipe['adjustments'] as List?) ?? const []).whereType<Map>())
+        '${a['identifier']}',
+    ];
+
+    // ---- 2. 只替换 Effect 项，其余字段原样保留
+    final adjustments = ((recipe['adjustments'] as List?) ?? const [])
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+    var replaced = false;
+    for (final a in adjustments) {
+      if (a['identifier'] != 'Effect') continue;
+      final settings =
+          Map<String, dynamic>.from((a['settings'] as Map?) ?? const {});
+      settings['effectName'] = effectName;
+      settings['effectIntensity'] = intensity;
+      a['settings'] = settings;
+      a['enabled'] = true;
+      replaced = true;
+      break;
+    }
+    if (!replaced) {
+      // 母本是「原片」时没有 Effect 项，补一个（字段形状照抄实测样本）
+      adjustments.add({
+        'formatVersion': 1,
+        'enabled': true,
+        'formatIdentifier': 'com.apple.photo',
+        'identifier': 'Effect',
+        'settings': {
+          'effectVersion': 1,
+          'effectName': effectName,
+          'effectIntensity': intensity,
+        },
+      });
+    }
+    recipe['adjustments'] = adjustments;
+    final newEnvelope = PhotoFilterInfo.encodeRecipeJson(recipe);
+    if (newEnvelope == null) throw StateError('配方重新压缩失败');
+    out['envelopeBytes'] = newEnvelope.length;
+
+    // ---- 3. 写 plist（结构照抄系统产物，只换 data 与时间）
+    final tmp = await getTemporaryDirectory();
+    final stamp = DateTime.now().millisecondsSinceEpoch;
+    final plistPath = '${tmp.path}/probe_recipe_$stamp.plist';
+    await File(plistPath).writeAsString(
+      _plistTemplate(base64Encode(newEnvelope), record.creationTimestamp),
+    );
+
+    // ---- 4. 导出主文件（DNG 当母本）
+    final exported = await PhotoLibraryHelper.exportPhotoAsset(
+      localIdentifier: id,
+      targetPath: '${tmp.path}/probe_main_$stamp.dng',
+    );
+    if (exported == null) throw StateError('导出原图失败');
+    out['mainPath'] = exported.path;
+    out['mainBytes'] = exported.bytes;
+
+    // ---- 5. 渲染图：配方必须与它成对
+    final editing = await PhotoLibraryHelper.analyzeAssetEditing(id);
+    final renderPath = editing?.renderedImagePath ?? '';
+    if (renderPath.isEmpty) {
+      throw StateError('拿不到 iOS 渲染图，配方无法成对写入');
+    }
+    out['renderPath'] = renderPath;
+
+    // ---- 6. 写副本
+    final saved = await PhotoLibraryHelper.savePhotoWithExtras(
+      filePath: exported.path,
+      creationTimestamp: record.creationTimestamp,
+      extras: [
+        {
+          'restoreType': 'adjustmentData',
+          'path': plistPath,
+          'filename': 'Adjustments.plist',
+        },
+        {
+          'restoreType': 'fullSizePhoto',
+          'path': renderPath,
+          'filename': 'FullSizeRender.jpg',
+        },
+      ],
+      mainFilename: record.relativePath.split('/').last,
+    );
+    out['written'] = saved.written;
+    out['failed'] = saved.failed;
+    out['warning'] = saved.warning;
+    out['error'] = saved.error;
+    final newId = saved.assetId;
+    out['newAssetId'] = newId;
+    if (newId.isEmpty) return out;
+    await _track(newId);
+
+    // ---- 7. 读回：副本里那份配方到底被 iOS 认成了什么
+    final back = await PhotoLibraryHelper.getAssetFullInfo(newId);
+    String? backB64;
+    for (final r in back?.resources ?? const <AssetResourceDetail>[]) {
+      final u = r.uti.toLowerCase();
+      if (r.base64.isNotEmpty &&
+          (u.contains('adjustment') || u.contains('property-list'))) {
+        backB64 = r.base64;
+        break;
+      }
+    }
+    if (backB64 == null) {
+      out['readBack'] = '副本里没有调整配方资源';
+      return out;
+    }
+    final backText = utf8.decode(base64Decode(backB64), allowMalformed: true);
+    final info = PhotoFilterInfo.fromPlistText(backText);
+    final backEditing = await PhotoLibraryHelper.analyzeAssetEditing(newId);
+    out['readBack'] = {
+      'status': info.status,
+      'description': info.description,
+      'effectName': info.identifier,
+      'intensity': info.intensity,
+      'hasAdjustments': backEditing?.hasAdjustments ?? false,
+      'resources': [
+        for (final r in back?.resources ?? const <AssetResourceDetail>[])
+          '${r.typeRawValue}:${r.filename}',
+      ],
+    };
+    return out;
+  }
+
+  /// 复刻相册写出的 `Adjustments.plist` 结构，只替换 data 与时间
+  static String _plistTemplate(String base64Data, double createdUnix) {
+    final dt = DateTime.fromMillisecondsSinceEpoch(
+      (createdUnix * 1000).round(),
+      isUtc: true,
+    );
+    final iso = '${dt.toIso8601String().split('.').first}Z';
+    final lines = <String>[];
+    for (var i = 0; i < base64Data.length; i += 68) {
+      final end = i + 68 < base64Data.length ? i + 68 : base64Data.length;
+      lines.add(base64Data.substring(i, end));
+    }
+    return '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0">\n'
+        '<dict>\n'
+        '\t<key>adjustmentBaseVersion</key>\n'
+        '\t<integer>0</integer>\n'
+        '\t<key>adjustmentData</key>\n'
+        '\t<data>\n'
+        '${lines.join('\n')}\n'
+        '\t</data>\n'
+        '\t<key>adjustmentEditorBundleID</key>\n'
+        '\t<string>com.apple.mobileslideshow</string>\n'
+        '\t<key>adjustmentFormatIdentifier</key>\n'
+        '\t<string>com.apple.photo</string>\n'
+        '\t<key>adjustmentFormatVersion</key>\n'
+        '\t<string>1.9.1</string>\n'
+        '\t<key>adjustmentRenderTypes</key>\n'
+        '\t<integer>3072</integer>\n'
+        '\t<key>adjustmentTimestamp</key>\n'
+        '\t<date>$iso</date>\n'
+        '</dict>\n'
+        '</plist>\n';
   }
 
   /// 只读回读：资源清单 + 各资源哈希 + 编辑附件（解码后的配方）

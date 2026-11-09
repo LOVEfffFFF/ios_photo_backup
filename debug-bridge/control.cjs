@@ -3,7 +3,7 @@ async function main() {
   const [file, action = 'status', target, importVariant] = process.argv.slice(2);
   if (!file) throw new Error('Usage: node control.cjs CONNECTION_FILE status|logs|inspect|roundTrip|job [TARGET]');
   const connection = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
-  const job = ['inspect', 'roundTrip', 'scanEffects'].includes(action);
+  const job = ['inspect', 'roundTrip', 'scanEffects', 'filterProbe'].includes(action);
   const route = job ? '/control/jobs' : action === 'job' ? '/control/jobs/' + encodeURIComponent(target || '')
     : action === 'status' ? '/control/status' : action === 'logs' ? '/control/logs' : null;
   if (!route) throw new Error('Unknown action');
