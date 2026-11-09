@@ -579,6 +579,21 @@ Future<String?> _saveWithExtras(
           '$base 恢复完成，${r.written} 个附加资源全部写入（含 RAW 原图与编辑指令）',
         );
       }
+      // 相册归属（GAP-M1）：导入成功后再放回原相册。
+      // 失败只记日志，不改变「已恢复」的判定 —— 照片本身已经在相册里了。
+      if (r.assetId.isNotEmpty && record.albums.isNotEmpty) {
+        final added = await PhotoLibraryHelper.addAssetsToAlbums(
+          localIdentifier: r.assetId,
+          albums: record.albums,
+        );
+        if (added > 0) {
+          LogService.instance.write(
+            LogLevel.info,
+            'restore',
+            '$base 已放回原相册：${record.albums.join("、")}',
+          );
+        }
+      }
       return r.assetId;
     } finally {
       for (final f in cleanup) {

@@ -564,6 +564,45 @@ class PhotoLibraryHelper {
     }
   }
 
+  /// 把刚恢复的资产加回它原来的用户相册（GAP-M1）
+  ///
+  /// 按**标题**查找相册，缺失的由原生新建；只处理用户自建相册，智能相册
+  /// （最近项目 / 收藏 / 截图）由系统按规则生成，无需重建。
+  ///
+  /// 相册归属属于「还原完整度」而不是「照片本身」，所以失败只记日志、
+  /// 返回 0，**不能让一张照片因为加不进相册就被判成恢复失败**。
+  static Future<int> addAssetsToAlbums({
+    required String localIdentifier,
+    required List<String> albums,
+  }) async {
+    if (localIdentifier.isEmpty || albums.isEmpty) return 0;
+    try {
+      final raw = await _channel.invokeMethod('addAssetsToAlbums', {
+        'localIdentifier': localIdentifier,
+        'albums': albums,
+      });
+      if (raw is Map) {
+        final added = (raw['added'] as num?)?.toInt() ?? 0;
+        final error = '${raw['error'] ?? ''}';
+        if (error.isNotEmpty) {
+          LogService.instance.write(
+            LogLevel.warn,
+            'restore',
+            '加入相册失败 [$localIdentifier]: $error',
+          );
+        }
+        return added;
+      }
+    } catch (e) {
+      LogService.instance.write(
+        LogLevel.warn,
+        'restore',
+        '加入相册异常 [$localIdentifier]: $e',
+      );
+    }
+    return 0;
+  }
+
   /// 导出照片数据到文件
   /// [localIdentifier] 照片唯一标识
   /// [targetPath] 目标文件路径（扩展名仅作占位，最终以原生写入的为准）

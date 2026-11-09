@@ -167,6 +167,8 @@ class ServerClient {
     int? pixelHeight,
     String? contentSha256,
     int? resourceTotal,
+    /// 该资产所属的用户相册标题（GAP-M1）
+    List<String>? albums,
     List<String>? resourcePrimary,
     List<String>? resourceAuxiliary,
     String? resourceUti,
@@ -216,6 +218,14 @@ class ServerClient {
       }
       if (resourceFilename != null && resourceFilename.isNotEmpty) {
         request.headers.set('X-Resource-Filename', resourceFilename);
+      }
+      if (albums != null && albums.isNotEmpty) {
+        // 相册名常含中文，不能直接塞 HTTP 头：整组 JSON → UTF-8 → base64。
+        // 接收端解码后写进 manifest 的 albums 字段，恢复时据此把照片放回原相册。
+        request.headers.set(
+          'X-Albums-B64',
+          base64Encode(utf8.encode(jsonEncode(albums))),
+        );
       }
       request.headers.contentType = ContentType.binary;
       final length = await file.length();

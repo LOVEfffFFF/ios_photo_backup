@@ -301,6 +301,8 @@ private func photoBackupSignalHandler(_ sig: Int32) {
             analyzeAssetEditing(call: call, result: result)
         case "scanUsedEffects":
             scanUsedEffects(call: call, result: result)
+        case "addAssetsToAlbums":
+            addAssetsToAlbums(call: call, result: result)
         case "getAssetFullInfo":
             getAssetFullInfo(call: call, result: result)
         case "getAssetThumbnails":
@@ -544,6 +546,10 @@ private func photoBackupSignalHandler(_ sig: Int32) {
 
             let allAssets = PHAsset.fetchAssets(with: fetchOptions)
             var assetsList: [[String: Any]] = []
+            // 相册归属：先反向建「资产 → 相册标题」，再逐资产查表。
+            // 不能对每张照片单独调 fetchAssetCollectionsContaining —— 全库三万张
+            // 就是三万次查询，扫描会从秒级变成分钟级。
+            let albumMap = Self.albumTitlesByAsset()
 
             allAssets.enumerateObjects { asset, _, _ in
                 let assetDict: [String: Any] = [
@@ -554,6 +560,9 @@ private func photoBackupSignalHandler(_ sig: Int32) {
                     "pixelWidth": asset.pixelWidth,
                     "pixelHeight": asset.pixelHeight,
                     "duration": asset.duration,
+                    // 所属用户相册的标题（可能多个）。存标题不存 localIdentifier：
+                    // 后者换设备就失效，而恢复时本来就该按名字找/建相册。
+                    "albums": albumMap[asset.localIdentifier] ?? [],
                 ]
                 assetsList.append(assetDict)
             }
@@ -561,6 +570,99 @@ private func photoBackupSignalHandler(_ sig: Int32) {
             DispatchQueue.main.async {
                 result(assetsList)
             }
+        }
+    }
+
+    /// 全库「资产 → 所属用户相册标题」
+    ///
+    /// 为什么反向遍历：`fetchAssetCollectionsContaining` 是单资产查询，全库三万张
+    /// 就要查三万次；反过来先取相册、再取每个相册里的资产 id，相册通常只有几个，
+    /// 代价从 O(资产数) 降到 O(相册数)。
+    ///
+    /// 只收 `.albumRegular`（用户自建相册）：智能相册（最近项目 / 收藏 / 截图）
+    /// 由系统按规则自动生成，恢复时无需也无法重建；`.albumSyncedAlbum` 来自
+    /// iTunes 同步，App 无权重建议。
+    private static func albumTitlesByAsset() -> [String: [String]] {
+        var map: [String: [String]] = [:]
+        let albums = PHAssetCollection.fetchAssetCollections(
+            with: .album, subtype: .albumRegular, options: nil)
+        albums.enumerateObjects { collection, _, _ in
+            guard let title = collection.localizedTitle, !title.isEmpty else { return }
+            let inAlbum = PHAsset.fetchAssets(in: collection, options: nil)
+            inAlbum.enumerateObjects { asset, _, _ in
+                var titles = map[asset.localIdentifier] ?? []
+                if !titles.contains(title) { titles.append(title) }
+                map[asset.localIdentifier] = titles
+            }
+        }
+        return map
+    }
+
+    /// 把恢复出来的资产加回它原来的相册（按标题查找，缺失则新建）
+    ///
+    /// 相册内的先后顺序不单独记录：相册按拍摄时间排列，而拍摄时间已按亚秒精度
+    /// 还原，顺序自然正确；iOS 相册本身也不支持手动拖拽排序，不必为此引入
+    /// insertAssets 的越界风险。
+    private func addAssetsToAlbums(
+        call: FlutterMethodCall, result: @escaping FlutterResult
+    ) {
+        guard let args = call.arguments as? [String: Any],
+              let assetId = args["localIdentifier"] as? String,
+              let titles = args["albums"] as? [String], !titles.isEmpty else {
+            result(["added": 0])
+            return
+        }
+        let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [assetId], options: nil)
+        guard let asset = fetch.firstObject else {
+            result(["added": 0, "error": "资产不存在"])
+            return
+        }
+
+        var existing: [String: PHAssetCollection] = [:]
+        let albums = PHAssetCollection.fetchAssetCollections(
+            with: .album, subtype: .albumRegular, options: nil)
+        albums.enumerateObjects { c, _, _ in
+            if let t = c.localizedTitle, !t.isEmpty, existing[t] == nil { existing[t] = c }
+        }
+
+        func addToExisting() {
+            var lookup: [String: PHAssetCollection] = [:]
+            let all = PHAssetCollection.fetchAssetCollections(
+                with: .album, subtype: .albumRegular, options: nil)
+            all.enumerateObjects { c, _, _ in
+                if let t = c.localizedTitle, !t.isEmpty, lookup[t] == nil { lookup[t] = c }
+            }
+            PHPhotoLibrary.shared().performChanges({
+                for title in titles {
+                    guard let collection = lookup[title],
+                          let change = PHAssetCollectionChangeRequest(for: collection)
+                    else { continue }
+                    change.addAssets([asset] as NSArray)
+                }
+            }) { ok, error in
+                DispatchQueue.main.async {
+                    result([
+                        "added": ok ? titles.count : 0,
+                        "error": error?.localizedDescription ?? "",
+                    ])
+                }
+            }
+        }
+
+        // 缺失的相册先建：creationRequestForAssetCollection 拿到的是 placeholder，
+        // 不能在同一次变更里直接塞资产，所以建完重新查询再 addAssets。
+        let missing = titles.filter { existing[$0] == nil }
+        if missing.isEmpty {
+            addToExisting()
+            return
+        }
+        PHPhotoLibrary.shared().performChanges({
+            for title in missing {
+                PHAssetCollectionChangeRequest
+                    .creationRequestForAssetCollection(withTitle: title)
+            }
+        }) { _, _ in
+            addToExisting()
         }
     }
 

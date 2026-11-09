@@ -158,6 +158,12 @@ class ManifestEntry {
   /// iOS 里的原始文件名（如 IMG_6550.DNG）
   final String originalFilename;
 
+  /// 该资产所属的用户自建相册标题（GAP-M1）
+  ///
+  /// 只有 main 行才有（附加资源行不重复同一份相册信息）；旧记录为空列表，
+  /// 恢复时表现与以前一致 —— 照片进「最近项目」。
+  final List<String> albums;
+
   /// 是否是资产的主文件
   ///
   /// 清单里一个资产会有多条：main / pairedVideo / raw / adjustment / adjustmentAAE。
@@ -181,6 +187,7 @@ class ManifestEntry {
     this.resourceTotal,
     this.uti = '',
     this.originalFilename = '',
+    this.albums = const [],
   });
 
   bool get isPairedVideo => role == 'pairedVideo';
@@ -202,6 +209,10 @@ class ManifestEntry {
         resourceTotal: (e['resourceTotal'] as num?)?.toInt(),
         uti: (e['uti'] as String?) ?? '',
         originalFilename: (e['originalFilename'] as String?) ?? '',
+        albums: ((e['albums'] as List?) ?? const [])
+            .map((v) => '$v')
+            .where((v) => v.isNotEmpty)
+            .toList(),
       );
 
   /// 该条目对应的资产指纹
@@ -434,6 +445,8 @@ class ManifestIndex {
           contentSha256: e.clientSha256,
           resourceTotal: e.resourceTotal,
           extraResources: extras,
+          // 相册归属随清单一起重建：沙盒丢失后仍能把照片放回原相册
+          albums: e.albums,
         ),
       );
     }

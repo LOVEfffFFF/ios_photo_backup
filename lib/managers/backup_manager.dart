@@ -327,6 +327,11 @@ class BackupManager {
         // 像素宽高：设备无关指纹的要素之一，随元数据一起发给电脑端记账
         final pixelWidth = (asset['pixelWidth'] as num?)?.toInt();
         final pixelHeight = (asset['pixelHeight'] as num?)?.toInt();
+        // 所属用户相册标题（GAP-M1）：恢复时据此把照片放回原相册
+        final albums = ((asset['albums'] as List?) ?? const [])
+            .map((e) => '$e')
+            .where((e) => e.isNotEmpty)
+            .toList();
 
         var bytesThisAsset = 0;
         String? failure;
@@ -342,6 +347,7 @@ class BackupManager {
               creationTimestamp: creationTimestamp,
               pixelWidth: pixelWidth,
               pixelHeight: pixelHeight,
+              albums: albums,
               pendingRecords: pendingRecords,
             );
           } else if (mediaType == 'image') {
@@ -354,6 +360,7 @@ class BackupManager {
               isLivePhoto: isLivePhoto,
               pixelWidth: pixelWidth,
               pixelHeight: pixelHeight,
+              albums: albums,
               pendingRecords: pendingRecords,
             );
           } else {
@@ -456,6 +463,7 @@ class BackupManager {
     required bool isLivePhoto,
     required int? pixelWidth,
     required int? pixelHeight,
+    required List<String> albums,
     required List<BackupRecord> pendingRecords,
   }) async {
     // 扩展名只是占位，原生会按资源真实类型写入并返回实际路径
@@ -494,6 +502,9 @@ class BackupManager {
         creationTimestamp: creationTimestamp,
         pixelWidth: pixelWidth,
         pixelHeight: pixelHeight,
+        // 相册归属只随主文件那一行上传：接收端按 serverPath 记账，
+        // 附加资源行不必重复同一份相册信息
+        albums: albums,
         // 端到端校验：把「原图侧」的哈希与资源构成一起发上去。
         // 接收端会拿它与落盘字节的哈希比对，这是唯一能证明
         // 「备份内容 == 手机原图」的检查。
@@ -654,6 +665,7 @@ class BackupManager {
         resourcePrimary: exportResult.resourcePrimary,
         resourceAuxiliary: exportResult.resourceAuxiliary,
         extraResources: extraRecords,
+        albums: albums,
       ),
     );
 
@@ -669,6 +681,7 @@ class BackupManager {
     required double creationTimestamp,
     required int? pixelWidth,
     required int? pixelHeight,
+    required List<String> albums,
     required List<BackupRecord> pendingRecords,
   }) async {
     final fileName =
@@ -702,6 +715,7 @@ class BackupManager {
         creationTimestamp: creationTimestamp,
         pixelWidth: pixelWidth,
         pixelHeight: pixelHeight,
+        albums: albums,
         contentSha256: exportResult.sha256,
         resourceTotal: exportResult.resourceTotal,
         resourcePrimary: exportResult.resourcePrimary,
@@ -727,6 +741,7 @@ class BackupManager {
         mediaType: 'video',
         pixelWidth: pixelWidth,
         pixelHeight: pixelHeight,
+        albums: albums,
         contentSha256: exportResult.sha256,
         resourceTotal: exportResult.resourceTotal,
         resourcePrimary: exportResult.resourcePrimary,

@@ -77,6 +77,16 @@ class BackupRecord {
   /// 如果是 Live Photo，记录配对视频的相对路径
   final String? livePhotoVideoRelativePath;
 
+  /// 该资产所属的**用户自建相册**标题（GAP-M1）
+  ///
+  /// 存标题而不是相册的 `localIdentifier`：后者只在原设备有效，换机/重装后
+  /// 全部失效；而恢复时本来就该「按名字找相册，没有就建一个」。
+  /// 智能相册（最近项目 / 收藏 / 截图）不在其列 —— 那些由系统按规则生成。
+  ///
+  /// 相册内的先后顺序不单独记录：相册按拍摄时间排列，而 [creationTimestamp]
+  /// 已保留亚秒精度，恢复后顺序自然正确。
+  final List<String> albums;
+
   BackupRecord({
     required this.localIdentifier,
     required this.relativePath,
@@ -90,6 +100,7 @@ class BackupRecord {
     this.resourcePrimary = const [],
     this.resourceAuxiliary = const [],
     this.extraResources = const [],
+    this.albums = const [],
     double? creationTimestamp,
   }) : creationTimestamp =
             creationTimestamp ?? creationDate.millisecondsSinceEpoch / 1000.0;
@@ -118,6 +129,10 @@ class BackupRecord {
           .whereType<Map<String, dynamic>>()
           .map(BackupResource.fromJson)
           .toList(),
+      albums: ((json['albums'] as List?) ?? const [])
+          .map((e) => '$e')
+          .where((e) => e.isNotEmpty)
+          .toList(),
     );
   }
 
@@ -137,6 +152,7 @@ class BackupRecord {
       'resourcePrimary': resourcePrimary,
       'resourceAuxiliary': resourceAuxiliary,
       'extraResources': extraResources.map((e) => e.toJson()).toList(),
+      'albums': albums,
     };
   }
 }
