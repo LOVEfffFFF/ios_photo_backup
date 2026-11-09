@@ -1821,18 +1821,25 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
     /// ## 能拿到什么
     ///
     /// 通过 `PHContentEditingInput` 可以取到：
-    ///   · `adjustmentData` —— iOS 自己的编辑指令（**权威来源**，比从资源里
-    ///     抠出来的 Adjustments.plist 更可靠），能算字节数与 SHA256；
+    ///   · `adjustmentData` —— iOS 自己的编辑指令（`PHAdjustmentData`，字节在
+    ///     `.data` 上），能算字节数与 SHA256；
     ///   · `fullSizeImageURL` —— iOS 当前渲染出的成片；
     ///   · 渲染成片的字节数（`fullSizeImageURL` 指向的那个文件）。
     ///
-    /// ## 拿不到什么
+    /// ## 滤镜名是**能**读出来的（此前这里写「读不出来」是错的）
     ///
-    /// **滤镜名称**。Apple 从不公开 `adjustmentData` 的内部结构
-    /// （实测一个套了风格的 ProRAW 是 232 字节高熵二进制，无字符串、无可辨结构），
-    /// 所以「鲜艳/暖色/纪实」这类名字无法由程序读出，只能由用户在编辑界面看。
-    /// 想知道滤镜对不对，就比对 adjustmentData 的 SHA256：
-    /// 一致说明我们的链路没丢数据，若显示仍不同则是 iOS 不认那个槽位。
+    /// `adjustmentData.data` 是 **裸 DEFLATE**（没有 zlib 头，必须
+    /// `ZLibDecoder(raw: true)` 才解得开），解出来是 UTF-8 JSON：
+    /// `{"formatVersion":1,"adjustments":[{"identifier":"Effect",
+    ///   "settings":{"effectName":"3DVivid","effectIntensity":0.5}}]}`。
+    /// 解码与 effectName→中文名 的映射在 Dart 侧（`PhotoFilterInfo`）。
+    /// 当初判成「232 字节高熵私有二进制」，是因为按 zlib 去解 —— 头一个字节
+    /// 0x6D 的低 3 位就是裸 DEFLATE 的 BTYPE 标记，不是 magic。
+    ///
+    /// ## 判断「有没有编辑」用 PHAsset.hasAdjustments
+    ///
+    /// `contentEditingInput.adjustmentData` 在 ProRAW 上可能为 nil（即使已编辑），
+    /// 拿它当判据会把已编辑的照片认成没编辑。
     ///
     /// ## 注意：可能不回调
     ///
@@ -1917,7 +1924,10 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
 
                 send([
                     "assetId": asset.localIdentifier,
-                    "hasAdjustments": !adjResources.isEmpty || adjBytes > 0,
+                    // 权威判据是 PHAsset.hasAdjustments（公开属性）。
+                    // 以前用「资源里有配方 || adjustmentData 非空」推，ProRAW 上
+                    // adjustmentData 恒 nil，会漏判。
+                    "hasAdjustments": asset.hasAdjustments,
                     "adjustmentResourceCount": adjResources.count,
                     "adjustmentResources": adjResources,
                     "contentAdjustmentBytes": adjBytes,
@@ -1941,7 +1951,7 @@ private static func phAssetResourceType(forRestoreType kind: String) -> PHAssetR
                         + " 资产=\(localIdentifier)")
                     send([
                         "assetId": asset.localIdentifier,
-                        "hasAdjustments": !adjResources.isEmpty,
+                        "hasAdjustments": asset.hasAdjustments,
                         "adjustmentResourceCount": adjResources.count,
                         "adjustmentResources": adjResources,
                         "contentAdjustmentBytes": 0,

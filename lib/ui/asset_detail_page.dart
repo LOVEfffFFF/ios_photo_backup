@@ -161,9 +161,11 @@ class _AssetDetailPageState extends State<AssetDetailPage> {
       Padding(
         padding: const EdgeInsets.only(top: 4),
         child: Text(
-          '⚠ adjustmentData 为 nil ≠ 没有编辑：实测这张 ProRAW 回调成功但为 nil，'
-          '而资源里明明挂着 Adjustments.plist 与 .aae。'
-          '滤镜名程序读不出来（Apple 私有格式），要确认名字请在照片编辑界面看。',
+          '⚠ adjustmentData 为 nil ≠ 没有编辑：ProRAW 上它可能就是 nil，'
+          '而资源里挂着 Adjustments.plist 与 .aae。'
+          '判「有没有编辑」看上面的「相册判定已编辑」（PHAsset.hasAdjustments）。\n'
+          '滤镜名是**能**读出来的：adjustmentData 是裸 DEFLATE，解开是 JSON，'
+          'effectName 由 PhotoFilterInfo 翻译成中文名（如 3DDramaticWarm=反差暖色）。',
           style: TextStyle(fontSize: 11, color: Colors.orange.shade900),
         ),
       ),
