@@ -15,6 +15,7 @@
 | `PHOTO-EDITS.md` | 核心结论：`adjustmentData` 是 **base64 → 裸 DEFLATE → JSON 配方**；公开资源写入映射（DNG→`.photo`、配方→`.adjustmentData`、渲染图→`.fullSizePhoto`，且后两者必须成对）；相机 AAE（资源类型 16）无公开创建类型 |
 | `VALIDATION-0.2.0.md` | 首次真机确认「副本在系统相册显示正确滤镜名 + RAW 标记 + 可还原再编辑」 |
 | `VALIDATION-2026-10-19.md` | 首轮真机验收记录 |
+| `PHOTO-FILTERS.md` | **已实测的 9 个滤镜**（+「原片」）：`effectName ↔ 界面中文名` 对照与 IMG 编号证据、配方 JSON 每个字段的含义、判定规则、已知坑 |
 
 ## 编辑时间戳（`adjustmentTimestamp` 为什么保不住）
 
@@ -42,6 +43,7 @@
 | 能力 | 位置 |
 | --- | --- |
 | 配方解码（裸 DEFLATE + JSON） | `lib/models/photo_filter_info.dart` |
+| 滤镜全库扫描 | `ios/Runner/AppDelegate.swift`（`scanUsedEffects`）+ `lib/models/effect_scan.dart` + `lib/ui/effect_scan_page.dart` |
 | 资源角色分类与槽位映射 | `ios/Runner/AppDelegate.swift`（`classifyResource`） |
 | 接收端严格校验 | 工作区 `windows-receiver/PhotoBackupReceiver.ps1`（不入库） |
 | 接收端回归测试 | `tests/receiver-upload.tests.ps1` |
