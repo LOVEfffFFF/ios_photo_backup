@@ -143,14 +143,14 @@ function createBridge({directory, pairToken = String(crypto.randomInt(100000, 10
         if (!session || !session.status.enabled || now() - session.lastSeen > 15000) throw fail(409, 'Phone is offline');
         // scanEffects 覆盖全库、只读，不作用于选中照片，因此没有 target
         const scanEffects = body.kind === 'scanEffects';
-        // filterProbe 复用 importVariant 传参：probe:<effectName>:<intensity>
-        const filterProbe = body.kind === 'filterProbe';
-        if (!['inspect', 'roundTrip', 'scanEffects', 'filterProbe'].includes(body.kind)) throw fail(400, 'Unsupported command');
+        // filterProbe / filterMatrix 复用 importVariant 传参，不走变体白名单
+        const paramJob = body.kind === 'filterProbe' || body.kind === 'filterMatrix';
+        if (!['inspect', 'roundTrip', 'scanEffects', 'filterProbe', 'filterMatrix'].includes(body.kind)) throw fail(400, 'Unsupported command');
         if (!scanEffects && !validKey(body.target)) throw fail(400, 'Unsupported command');
         const variant = body.importVariant ?? 'baseline';
-        if (!filterProbe && (!importVariants.has(variant) || (variant !== 'baseline' && body.kind !== 'roundTrip'))) throw fail(400, 'Unsupported import variant');
-        if (!filterProbe && !session.importVariants.includes(variant)) throw fail(409, 'Install the timestamp test build on phone first');
-        if (filterProbe && !/^probe:[A-Za-z0-9_]+:[0-9]*\.?[0-9]+$/.test(String(body.importVariant || ''))) throw fail(400, 'filterProbe needs importVariant=probe:<effectName>:<intensity>');
+        if (!paramJob && (!importVariants.has(variant) || (variant !== 'baseline' && body.kind !== 'roundTrip'))) throw fail(400, 'Unsupported import variant');
+        if (!paramJob && !session.importVariants.includes(variant)) throw fail(409, 'Install the timestamp test build on phone first');
+        if (paramJob && !/^(probe:[A-Za-z0-9_]+:[0-9]*\.?[0-9]+(:norender)?|matrix:[0-9A-Za-z_.,:]+)$/.test(String(body.importVariant || ''))) throw fail(400, 'param job needs probe:<effect>:<0..1>[:norender] or matrix:<effect>:<0..1>,...');
         const original = !scanEffects && session.assets.some(a => a.key === body.target);
         const copy = !scanEffects && session.copies.some(a => a.key === body.target);
         if (!scanEffects && !original && !copy) throw fail(403, 'Target was not selected on phone');

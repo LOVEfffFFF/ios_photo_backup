@@ -120,19 +120,32 @@ class DebugPhotoExecutor implements DebugExecutor {
     // 滤镜写入实验：目标必须是本次会话勾选的照片（拿它当母本），
     // 参数用 importVariant 编码成 `probe:<effectName>:<intensity>`，
     // 这样不必改动任务结构就能把参数传进来。
-    if (kind == 'filterProbe') {
-      final m = RegExp(r'^probe:([^:]+):([0-9]*\.?[0-9]+)$').firstMatch(importVariant);
+    if (kind == 'filterProbe' || kind == 'filterMatrix') {
       final record = records[target];
-      if (m == null || record == null) {
-        throw StateError('filterProbe 需要 probe:<effectName>:<intensity>，且目标是已选照片');
+      if (record == null) throw StateError('目标照片不在本次授权范围');
+      final probe = RegExp(r'^probe:([^:]+):([0-9]*\.?[0-9]+)(?::(norender))?$')
+          .firstMatch(importVariant);
+      final matrix = RegExp(r'^matrix:([0-9A-Za-z_.,:]+)$').firstMatch(importVariant);
+      if (probe == null && matrix == null) {
+        throw StateError('需要 probe:<effect>:<0..1>[:norender] 或 matrix:<effect>:<0..1>,…');
       }
       _running = true;
       try {
-        return await probeFilter(
-          record,
-          effectName: m.group(1)!,
-          intensity: double.parse(m.group(2)!),
-        );
+        if (probe != null) {
+          return await probeFilter(
+            record,
+            effectName: probe.group(1)!,
+            intensity: double.parse(probe.group(2)!),
+            writeRender: probe.group(3) == null,
+          );
+        }
+        final items = <String, double>{};
+        for (final part in matrix!.group(1)!.split(',')) {
+          final seg = part.split(':');
+          if (seg.length != 2) throw StateError('矩阵项格式错误：$part');
+          items[seg[0]] = double.parse(seg[1]);
+        }
+        return await probeMatrix(record, items, writeRender: false);
       } finally {
         _running = false;
       }
@@ -278,6 +291,7 @@ class DebugPhotoExecutor implements DebugExecutor {
     BackupRecord record, {
     required String effectName,
     required double intensity,
+    bool writeRender = true,
   }) async {
     final out = <String, dynamic>{
       'requestedEffect': effectName,
@@ -372,13 +386,19 @@ class DebugPhotoExecutor implements DebugExecutor {
     out['mainPath'] = exported.path;
     out['mainBytes'] = exported.bytes;
 
-    // ---- 5. 渲染图：配方必须与它成对
-    final editing = await PhotoLibraryHelper.analyzeAssetEditing(id);
-    final renderPath = editing?.renderedImagePath ?? '';
-    if (renderPath.isEmpty) {
-      throw StateError('拿不到 iOS 渲染图，配方无法成对写入');
+    // ---- 5. 渲染图：默认与配方成对写；norender 变体只写 DNG + 配方，
+    //          用来验证 iOS 会不会自己按配方重渲染（缓存图不一致时的关键实验）
+    var renderPath = '';
+    if (writeRender) {
+      final editing = await PhotoLibraryHelper.analyzeAssetEditing(id);
+      renderPath = editing?.renderedImagePath ?? '';
+      if (renderPath.isEmpty) {
+        throw StateError('拿不到 iOS 渲染图，配方无法成对写入');
+      }
+      out['renderPath'] = renderPath;
+    } else {
+      out['renderPath'] = '(未写入，仅 DNG + 配方)';
     }
-    out['renderPath'] = renderPath;
 
     // ---- 6. 写副本
     final saved = await PhotoLibraryHelper.savePhotoWithExtras(
@@ -390,11 +410,12 @@ class DebugPhotoExecutor implements DebugExecutor {
           'path': plistPath,
           'filename': 'Adjustments.plist',
         },
-        {
-          'restoreType': 'fullSizePhoto',
-          'path': renderPath,
-          'filename': 'FullSizeRender.jpg',
-        },
+        if (writeRender)
+          {
+            'restoreType': 'fullSizePhoto',
+            'path': renderPath,
+            'filename': 'FullSizeRender.jpg',
+          },
       ],
       mainFilename: record.relativePath.split('/').last,
     );
@@ -436,6 +457,142 @@ class DebugPhotoExecutor implements DebugExecutor {
           '${r.typeRawValue}:${r.filename}',
       ],
     };
+    return out;
+  }
+
+  /// 批量：同一母本、多个「滤镜 + 强度」组合各写一个副本
+  ///
+  /// 与 [probeFilter] 的差别只有两点：DNG 只导出一次（64 MB 母本，导出比写
+  /// 副本还慢），并且**不逐个读回**（读回要把 64 MB DNG 整个读一遍，9 个组合
+  /// 要好几分钟）。名字对不对由事后一次 `scanEffects` 全库核对 —— 那只要 2 秒。
+  ///
+  /// 上限 12 个：写太多副本既占空间，也让相册索引变慢。
+  Future<Map<String, dynamic>> probeMatrix(
+    BackupRecord record,
+    Map<String, double> items, {
+    bool writeRender = false,
+  }) async {
+    if (items.isEmpty || items.length > 12) {
+      throw StateError('批量项必须 1..12 个');
+    }
+    final out = <String, dynamic>{
+      'writeRender': writeRender,
+      'items': <Map<String, dynamic>>[],
+    };
+
+    // 模板配方（一次）
+    final full =
+        await PhotoLibraryHelper.getAssetFullInfo(record.localIdentifier);
+    String? plistB64;
+    for (final r in full?.resources ?? const <AssetResourceDetail>[]) {
+      final u = r.uti.toLowerCase();
+      if (r.base64.isNotEmpty &&
+          (u.contains('adjustment') || u.contains('property-list'))) {
+        plistB64 = r.base64;
+        break;
+      }
+    }
+    if (plistB64 == null) throw StateError('原图没有可读的调整配方资源');
+    final plistText = utf8.decode(base64Decode(plistB64), allowMalformed: true);
+    final dataMatch = RegExp(
+      r'<key>\s*adjustmentData\s*</key>\s*<data>([\s\S]*?)</data>',
+    ).firstMatch(plistText);
+    if (dataMatch == null) throw StateError('模板 plist 里没有 adjustmentData');
+    final baseRecipe = PhotoFilterInfo.rawRecipeJson(
+      base64Decode(dataMatch.group(1)!.replaceAll(RegExp(r'\s'), '')),
+    );
+    if (baseRecipe == null) throw StateError('模板配方解不开');
+
+    // 母本与渲染图各取一次
+    final tmp = await getTemporaryDirectory();
+    final stamp = DateTime.now().millisecondsSinceEpoch;
+    final exported = await PhotoLibraryHelper.exportPhotoAsset(
+      localIdentifier: record.localIdentifier,
+      targetPath: '${tmp.path}/matrix_main_$stamp.dng',
+    );
+    if (exported == null) throw StateError('导出原图失败');
+    out['mainBytes'] = exported.bytes;
+    var renderPath = '';
+    if (writeRender) {
+      final e = await PhotoLibraryHelper.analyzeAssetEditing(
+        record.localIdentifier,
+      );
+      renderPath = e?.renderedImagePath ?? '';
+      if (renderPath.isEmpty) throw StateError('拿不到 iOS 渲染图');
+    }
+
+    var index = 0;
+    for (final entry in items.entries) {
+      index++;
+      final effect = entry.key;
+      final intensity = entry.value;
+      // 深拷贝模板：每份组合都要独立改，不能共享同一份 map
+      final recipe =
+          jsonDecode(jsonEncode(baseRecipe)) as Map<String, dynamic>;
+      final adjustments = ((recipe['adjustments'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+      var replaced = false;
+      for (final a in adjustments) {
+        if (a['identifier'] != 'Effect') continue;
+        final s = Map<String, dynamic>.from((a['settings'] as Map?) ?? const {});
+        s['effectName'] = effect;
+        s['effectIntensity'] = intensity;
+        a['settings'] = s;
+        a['enabled'] = true;
+        replaced = true;
+        break;
+      }
+      if (!replaced) {
+        adjustments.add({
+          'formatVersion': 1,
+          'enabled': true,
+          'formatIdentifier': 'com.apple.photo',
+          'identifier': 'Effect',
+          'settings': {
+            'effectVersion': 1,
+            'effectName': effect,
+            'effectIntensity': intensity,
+          },
+        });
+      }
+      recipe['adjustments'] = adjustments;
+      final envelope = PhotoFilterInfo.encodeRecipeJson(recipe);
+      if (envelope == null) continue;
+
+      final plistPath = '${tmp.path}/matrix_${stamp}_$index.plist';
+      await File(plistPath).writeAsString(
+        _plistTemplate(base64Encode(envelope), record.creationTimestamp),
+      );
+      final saved = await PhotoLibraryHelper.savePhotoWithExtras(
+        filePath: exported.path,
+        creationTimestamp: record.creationTimestamp,
+        extras: [
+          {
+            'restoreType': 'adjustmentData',
+            'path': plistPath,
+            'filename': 'Adjustments.plist',
+          },
+          if (writeRender)
+            {
+              'restoreType': 'fullSizePhoto',
+              'path': renderPath,
+              'filename': 'FullSizeRender.jpg',
+            },
+        ],
+        mainFilename: 'probe_${effect}_${(intensity * 100).round()}.dng',
+      );
+      if (saved.assetId.isNotEmpty) await _track(saved.assetId);
+      (out['items'] as List).add({
+        'effect': effect,
+        'intensity': intensity,
+        'assetId': saved.assetId,
+        'written': saved.written,
+        'failed': saved.failed,
+        'error': saved.error,
+      });
+    }
     return out;
   }
 
